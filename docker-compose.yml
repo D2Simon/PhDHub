@@ -1,0 +1,29 @@
+services:
+  phdhub:
+    build:
+      context: .
+    image: phdhub:latest
+    container_name: phdhub
+    restart: unless-stopped
+    ports:
+      - "${PHDHUB_PORT:-8501}:8501"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      PHDHUB_DATA_DIR: /data
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_PORT: 8501
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      # 如需在容器内访问宿主机代理，可在 .env 中设置为：
+      # HTTP_PROXY=http://host.docker.internal:7890
+      # HTTPS_PROXY=http://host.docker.internal:7890
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    volumes:
+      - phdhub_data:/data
+
+volumes:
+  phdhub_data:
+    name: phdhub_data

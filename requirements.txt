@@ -1,0 +1,10 @@
+streamlit
+openai
+google-generativeai
+pandas
+plotly
+pycountry
+streamlit-autorefresh
+requests
+PyMuPDF
+tzdata
