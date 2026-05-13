@@ -1,8 +1,22 @@
 """Shared file paths and defaults for local persistence."""
 
-CONFIG_FILE = "phdhub_config.json"
-DB_FILE = "phdhub_db.json"
-EMAILS_CACHE_FILE = "phdhub_emails_cache.json"
+import os
+
+
+_DATA_DIR = os.environ.get("PHDHUB_DATA_DIR", "").strip()
+
+
+def _data_path(name):
+    """Return a local path, optionally rooted under PHDHUB_DATA_DIR."""
+    if not _DATA_DIR:
+        return name
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    return os.path.join(_DATA_DIR, name)
+
+
+CONFIG_FILE = _data_path("phdhub_config.json")
+DB_FILE = _data_path("phdhub_db.json")
+EMAILS_CACHE_FILE = _data_path("phdhub_emails_cache.json")
 
 DEFAULT_CONFIG = {
     "email": "",
@@ -11,8 +25,8 @@ DEFAULT_CONFIG = {
     "smtp_server": "smtp.gmail.com",
 }
 
-RESUME_DIR = "resumes"
-RESUME_INDEX_FILE = "phdhub_resumes.json"
+RESUME_DIR = _data_path("resumes")
+RESUME_INDEX_FILE = _data_path("phdhub_resumes.json")
 
-RP_DIR = "rps"
-RP_INDEX_FILE = "phdhub_rps.json"
+RP_DIR = _data_path("rps")
+RP_INDEX_FILE = _data_path("phdhub_rps.json")

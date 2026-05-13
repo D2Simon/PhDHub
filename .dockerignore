@@ -1,0 +1,29 @@
+.git
+.gitignore
+.idea
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+.DS_Store
+
+# Local secrets and persisted app data
+.env
+.env.*
+*.env
+*.key
+*.pem
+secrets.*
+phdhub_config.json
+phdhub_db.json
+phdhub_emails_cache.json
+phdhub_resumes.json
+phdhub_rps.json
+resumes/
+rps/
+*.log
+
+# Not needed at runtime
+ui-ux-pro-max-skill/

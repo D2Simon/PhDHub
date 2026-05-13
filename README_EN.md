@@ -61,7 +61,7 @@ source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 
 ```bash
 pip install -U pip
-pip install streamlit openai google-generativeai pandas plotly streamlit-autorefresh requests PyMuPDF
+pip install -r requirements.txt
 ```
 
 4. Start the app
@@ -69,6 +69,31 @@ pip install streamlit openai google-generativeai pandas plotly streamlit-autoref
 ```bash
 bash run.sh
 ```
+
+## Start with Docker Compose
+
+If Docker / Docker Compose is installed, you can run PhDHub in a container:
+
+```bash
+docker compose up -d --build
+```
+
+Then open: http://localhost:8501
+
+Useful commands:
+
+```bash
+# Follow logs
+docker compose logs -f phdhub
+
+# Stop the service while keeping the data volume
+docker compose down
+
+# Use another host port, for example 8502
+PHDHUB_PORT=8502 docker compose up -d
+```
+
+Application data is persisted in the Docker volume `phdhub_data` (mounted at `/data` in the container). To remove persisted data, run `docker compose down -v`.
 
 ## Configuration
 

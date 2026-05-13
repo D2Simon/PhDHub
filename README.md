@@ -61,7 +61,7 @@ source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 
 ```bash
 pip install -U pip
-pip install streamlit openai google-generativeai pandas plotly streamlit-autorefresh requests PyMuPDF
+pip install -r requirements.txt
 ```
 
 4. 启动应用
@@ -69,6 +69,25 @@ pip install streamlit openai google-generativeai pandas plotly streamlit-autoref
 ```bash
 bash run.sh
 ```
+
+## Docker Compose 启动
+
+如果你已安装 Docker / Docker Compose，也可以直接容器化运行：
+
+```bash
+docker compose up -d --build
+```
+
+启动后访问：http://localhost:8501
+
+常用命令：
+
+```bash
+# 停止服务（保留数据卷）
+docker compose down
+```
+
+应用数据默认保存在 Docker volume `phdhub_data`（容器内 `/data`）。如需清空数据，可执行 `docker compose down -v`。
 
 ## 配置说明
 
