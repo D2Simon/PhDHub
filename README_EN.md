@@ -1,6 +1,18 @@
 # PhDHub
 
+[English](README.md) | [中文](README_CN.md)
+
 PhDHub is a localized AI workspace for PhD applicants. It connects resume/RP management, email triage, professor tracking, interview preparation, and interview review into one workflow, so you can reduce context switching and follow-up misses.
+
+## 🔥 New Release: Lite Mode
+
+The new version of PhDHub introduces Lite Mode for users who do not want to configure email authorization, API keys, or AI features right away. Lite Mode keeps the core outreach workflow: Outreach Dashboard, Email Records (Lite), and Professor Database, so you can start organizing professors, logging emails, and tracking reply status with a much lighter setup.
+
+Key differences between Lite Mode and Full Mode:
+
+- Lite Mode does not require IMAP email authorization or AI model access. Full Mode includes smart email fetching, AI email classification, resume/RP analysis, interview preparation, and other automated workflows.
+- Lite Mode uses manually entered email records for outreach tracking. You can tag emails as sent inquiry, positive reply, neutral reply, negative reply, interview scheduled, or non-outreach, and those tags update the professor database and dashboard.
+- Lite Mode and Full Mode share the same local data, including the professor database and email cache. You can start with manual tracking in Lite Mode, then switch to Full Mode later for AI and email automation.
 
 ## UI Preview (Carousel)
 
@@ -39,9 +51,9 @@ PhDHub is a localized AI workspace for PhD applicants. It connects resume/RP man
   - Qwen/Gemini provider switching and auto-saved API keys.
   - Email connection setup (IMAP/SMTP).
 
-## Dependency Installation
+## One-Click Conda Setup and Start
 
-> Recommended Python 3.10+ (minimum 3.9).
+> Requires Miniconda or Anaconda. Just run one script: it creates/uses the `phdhub` conda environment, prepares missing packages when needed, and starts PhDHub with progress messages. If everything is already installed, it skips setup and starts directly.
 
 1. Clone the repository
 
@@ -50,24 +62,22 @@ git clone <your-repo-url>
 cd PhDHub
 ```
 
-2. Create and activate a virtual environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-```
-
-3. Install dependencies
-
-```bash
-pip install -U pip
-pip install -r requirements.txt
-```
-
-4. Start the app
+2. Run the one-click script
 
 ```bash
 bash run.sh
+```
+
+When Streamlit finishes starting, open: http://localhost:8501
+
+Useful options:
+
+```bash
+# Use a custom conda environment name
+CONDA_ENV_NAME=phdhub-lite bash run.sh
+
+# Use another port
+APP_PORT=8502 bash run.sh
 ```
 
 ## Start with Docker Compose

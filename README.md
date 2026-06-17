@@ -1,100 +1,116 @@
 # PhDHub
 
-PhDHub 是一个面向博士申请场景的本地化 AI 工作台，把“简历/RP 管理、邮件识别与分类、导师建库、面试准备与复盘”串成一个闭环，帮助申请者减少信息分散和跟进遗漏。
+[English](README.md) | [中文](README_CN.md)
 
-## 界面轮播预览
+PhDHub is a localized AI workspace for PhD applicants. It connects resume/RP management, email triage, professor tracking, interview preparation, and interview review into one workflow, so you can reduce context switching and follow-up misses.
+
+## 🔥 New Release: Lite Mode
+
+The new version of PhDHub introduces Lite Mode for users who do not want to configure email authorization, API keys, or AI features right away. Lite Mode keeps the core outreach workflow: Outreach Dashboard, Email Records (Lite), and Professor Database, so you can start organizing professors, logging emails, and tracking reply status with a much lighter setup.
+
+Key differences between Lite Mode and Full Mode:
+
+- Lite Mode does not require IMAP email authorization or AI model access. Full Mode includes smart email fetching, AI email classification, resume/RP analysis, interview preparation, and other automated workflows.
+- Lite Mode uses manually entered email records for outreach tracking. You can tag emails as sent inquiry, positive reply, neutral reply, negative reply, interview scheduled, or non-outreach, and those tags update the professor database and dashboard.
+- Lite Mode and Full Mode share the same local data, including the professor database and email cache. You can start with manual tracking in Lite Mode, then switch to Full Mode later for AI and email automation.
+
+## UI Preview (Carousel)
 
 ![PhDHub UI Carousel](fig/carousel.gif)
 
-## 项目具体功能
+## Features
 
-- 简历管理（My Resume）
-  - 支持多份 PDF 简历上传、切换、删除、缩略图预览。
-  - AI 自动生成简历分析（优势/劣势/改进建议），并按简历维度缓存。
+- Resume Management (My Resume)
+  - Upload, switch, delete, and preview multiple PDF resumes.
+  - AI-generated resume analysis (strengths, weaknesses, improvements) with per-resume caching.
 
-- RP 管理（My RP）
-  - 支持多份 RP PDF 上传、切换、删除与预览。
-  - AI 自动输出 RP 优点、缺点、改进建议。
+- RP Management (My RP)
+  - Upload, switch, delete, and preview multiple RP PDFs.
+  - AI-generated RP analysis (good points, weaknesses, improvements).
 
-- 智能邮箱中心（AI Email）
-  - IMAP 拉取邮件、缓存读取、手动强制拉取。
-  - 自动识别博士申请相关邮件并分类（已发送/积极回复/中立/消极/面试等）。
-  - 从邮件 + 导师主页中提取导师档案，快速同步到导师库。
+- Smart Email Center (AI Email)
+  - IMAP email fetching, cache loading, and manual force refresh.
+  - Automatic classification of PhD-related emails (sent inquiry, positive/neutral/negative reply, interview, etc.).
+  - Extract professor profile fields from email + homepage content and sync to the professor database.
 
-- 套瓷进度大盘（Dashboard）
-  - 展示近 7 天与累计指标（发送、回复、积极/中立/消极、面试预约）。
-  - 提供阶段化进度追踪与可视化。
+- Outreach Dashboard
+  - Shows 7-day and all-time metrics (sent, replies, positive/neutral/negative, interview scheduled).
+  - Stage-based progress tracking and visualization.
 
-- 导师库管理（Professor DB）
-  - 统一管理导师/学校/院系/国家/研究方向/阶段/更新时间。
-  - 支持筛选、时区展示、记录维护。
+- Professor Database (Professor DB)
+  - Unified management for professor/school/department/country/research direction/stage/timestamps.
+  - Supports filtering, timezone display, and record maintenance.
 
-- 面试准备舱（Interview Prep）
-  - 一键生成高频面试问题。
-  - 基于简历 + 导师主页 + 论文信息生成个性化面试建议。
-  - 模拟面试对话、追问与评分复盘。
-  - 支持“高频考察点”沉淀（问题 + 建议回答 + 要点）。
+- Interview Prep
+  - One-click generation of high-frequency interview questions.
+  - Personalized interview advice based on resume + professor homepage + paper signals.
+  - Mock interview dialogue, follow-up questioning, scoring, and review.
+  - High-frequency point bank (question + suggested answer + key points).
 
-- 系统配置（System Config）
-  - 支持 Qwen / Gemini 模型切换与 API Key 自动保存。
-  - 支持邮箱连接配置（IMAP/SMTP）。
+- System Config
+  - Qwen/Gemini provider switching and auto-saved API keys.
+  - Email connection setup (IMAP/SMTP).
 
-## 安装依赖教程
+## One-Click Conda Setup and Start
 
-> 建议 Python 3.10+（最低建议 3.9）。
+> Requires Miniconda or Anaconda. Just run one script: it creates/uses the `phdhub` conda environment, prepares missing packages when needed, and starts PhDHub with progress messages. If everything is already installed, it skips setup and starts directly.
 
-1. 克隆项目
+1. Clone the repository
 
 ```bash
-git clone <你的仓库地址>
+git clone <your-repo-url>
 cd PhDHub
 ```
 
-2. 创建并激活虚拟环境
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-```
-
-3. 安装依赖
-
-```bash
-pip install -U pip
-pip install -r requirements.txt
-```
-
-4. 启动应用
+2. Run the one-click script
 
 ```bash
 bash run.sh
 ```
 
-## Docker Compose 启动
+When Streamlit finishes starting, open: http://localhost:8501
 
-如果你已安装 Docker / Docker Compose，也可以直接容器化运行：
+Useful options:
+
+```bash
+# Use a custom conda environment name
+CONDA_ENV_NAME=phdhub-lite bash run.sh
+
+# Use another port
+APP_PORT=8502 bash run.sh
+```
+
+## Start with Docker Compose
+
+If Docker / Docker Compose is installed, you can run PhDHub in a container:
 
 ```bash
 docker compose up -d --build
 ```
 
-启动后访问：http://localhost:8501
+Then open: http://localhost:8501
 
-常用命令：
+Useful commands:
 
 ```bash
-# 停止服务（保留数据卷）
+# Follow logs
+docker compose logs -f phdhub
+
+# Stop the service while keeping the data volume
 docker compose down
+
+# Use another host port, for example 8502
+PHDHUB_PORT=8502 docker compose up -d
 ```
 
-应用数据默认保存在 Docker volume `phdhub_data`（容器内 `/data`）。如需清空数据，可执行 `docker compose down -v`。
+Application data is persisted in the Docker volume `phdhub_data` (mounted at `/data` in the container). To remove persisted data, run `docker compose down -v`.
 
-## 配置说明
+## Configuration
 
-首次启动后，在 `系统配置 / System Config` 页面填写：
+After first launch, open `系统配置 / System Config` and fill in:
 
-- 邮箱账号、IMAP/SMTP、应用专用密码（推荐 App Password）
-- AI 提供商（Qwen 或 Gemini）及对应 API Key
+- Email account, IMAP/SMTP, and app password (recommended)
+- AI provider (Qwen or Gemini) and the corresponding API key
 
 ---
 
