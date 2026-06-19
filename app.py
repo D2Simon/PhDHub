@@ -6,6 +6,7 @@ import streamlit as st
 import google.generativeai as genai
 from openai import OpenAI
 import json
+import re
 from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 from datetime import datetime, timedelta
@@ -48,11 +49,152 @@ from phdhub.stats import get_email_stats_from_emails, get_recent_7d_email_stats_
 from phdhub.storage import (
     load_config,
     load_db,
+    load_lite_emails,
     save_config,
     save_db,
+    save_lite_emails,
 )
 from phdhub.timezone_utils import format_local_time
 from phdhub.university import get_world_universities as get_world_universities_impl
+
+
+# 洲 -> 国家/地区 级联数据（值用英文，便于地图 ISO 与时区匹配；显示为双语）
+CONTINENTS = {
+    "亚洲 / Asia": ["China", "Hong Kong", "Taiwan", "Singapore", "Japan", "South Korea", "Malaysia"],
+    "欧洲 / Europe": ["United Kingdom", "Germany", "France", "Netherlands", "Switzerland", "Sweden", "Denmark", "Norway", "Finland", "Italy", "Spain", "Ireland", "Austria", "Belgium"],
+    "北美洲 / North America": ["United States", "Canada", "Mexico"],
+    "大洋洲 / Oceania": ["Australia", "New Zealand"],
+    "其他 / Other": [],
+}
+COUNTRY_LABELS = {
+    "China": "China 中国", "Hong Kong": "Hong Kong 香港", "Taiwan": "Taiwan 台湾",
+    "Singapore": "Singapore 新加坡", "Japan": "Japan 日本", "South Korea": "South Korea 韩国",
+    "Malaysia": "Malaysia 马来西亚", "United Kingdom": "United Kingdom 英国", "Germany": "Germany 德国",
+    "France": "France 法国", "Netherlands": "Netherlands 荷兰", "Switzerland": "Switzerland 瑞士",
+    "Sweden": "Sweden 瑞典", "Denmark": "Denmark 丹麦", "Norway": "Norway 挪威", "Finland": "Finland 芬兰",
+    "Italy": "Italy 意大利", "Spain": "Spain 西班牙", "Ireland": "Ireland 爱尔兰", "Austria": "Austria 奥地利",
+    "Belgium": "Belgium 比利时", "United States": "United States 美国", "Canada": "Canada 加拿大",
+    "Mexico": "Mexico 墨西哥", "Australia": "Australia 澳大利亚", "New Zealand": "New Zealand 新西兰",
+}
+
+
+def _ui_local(zh, en):
+    return en if st.session_state.get("app_lang", "zh-CN") == "en" else zh
+
+
+def lite_country_picker(key_prefix):
+    """先选大洲，再选国家/地区；选『其他』时手动输入。返回最终国家字符串（英文）。"""
+    conts = list(CONTINENTS.keys())
+    cont = st.selectbox(_ui_local("所在大洲", "Continent"), conts, key=f"{key_prefix}_cont")
+    countries = CONTINENTS.get(cont, [])
+    if countries:
+        return st.selectbox(
+            _ui_local("国家 / 地区", "Country / Region"), countries,
+            format_func=lambda c: COUNTRY_LABELS.get(c, c), key=f"{key_prefix}_country",
+        )
+    return st.text_input(_ui_local("国家 / 地区（手动输入）", "Country / Region (manual)"), key=f"{key_prefix}_country_manual").strip()
+
+
+def lite_prof_form(key_prefix, compact=False, show_contact=True):
+    """渲染导师资料输入并返回字段字典（含洲->国家级联）。
+    compact=两行紧凑布局；show_contact=是否在表单内渲染导师邮箱/主页（False 时由调用方自行渲染）。"""
+    if compact:
+        # 第一行：所在大洲 / 国家 / 学校
+        r1 = st.columns(3)
+        with r1[0]:
+            conts = list(CONTINENTS.keys())
+            cont = st.selectbox(_ui_local("所在大洲", "Continent"), conts, key=f"{key_prefix}_cont")
+        with r1[1]:
+            countries = CONTINENTS.get(cont, [])
+            if countries:
+                country = st.selectbox(_ui_local("国家 / 地区", "Country / Region"), countries,
+                                       format_func=lambda c: COUNTRY_LABELS.get(c, c), key=f"{key_prefix}_country")
+            else:
+                country = st.text_input(_ui_local("国家 / 地区", "Country / Region"), key=f"{key_prefix}_country_manual").strip()
+        with r1[2]:
+            univ_candidates = []
+            if country:
+                world_univ = get_world_universities()
+                for k, v in world_univ.items():
+                    kname = k.split(" ", 1)[1] if " " in k else k
+                    if kname.strip().lower() == str(country).strip().lower():
+                        univ_candidates = list(v)
+                        break
+            if univ_candidates:
+                manual_label = _ui_local("其他（手动输入）", "Other (manual)")
+                choice = st.selectbox(_ui_local("学校", "University"), univ_candidates + [manual_label], key=f"{key_prefix}_univsel")
+                if choice == manual_label:
+                    univ = st.text_input(_ui_local("学校名称", "University name"), key=f"{key_prefix}_puniv").strip()
+                else:
+                    univ = re.sub(r"\s*\(QS.*?\)\s*$", "", choice).strip()
+            else:
+                univ = st.text_input(_ui_local("学校", "University"), key=f"{key_prefix}_puniv").strip()
+        # 第二行：导师姓名 / 学院 / 研究方向 / 意向级别
+        r2 = st.columns(4)
+        with r2[0]:
+            name = st.text_input(_ui_local("导师姓名", "Professor name"), key=f"{key_prefix}_pname")
+        with r2[1]:
+            dept = st.text_input(_ui_local("学院", "Department"), key=f"{key_prefix}_pdept")
+        with r2[2]:
+            direction = st.text_input(_ui_local("研究方向", "Research direction"), key=f"{key_prefix}_pdir")
+        with r2[3]:
+            prio = st.selectbox(_ui_local("意向级别", "Priority"), ["T0", "T1", "T2"], index=1, key=f"{key_prefix}_pprio")
+        if show_contact:
+            r3 = st.columns(2)
+            with r3[0]:
+                email = st.text_input(_ui_local("导师邮箱（选填）", "Professor email (optional)"), key=f"{key_prefix}_pemail")
+            with r3[1]:
+                home = st.text_input(_ui_local("主页链接（选填）", "Homepage (optional)"), key=f"{key_prefix}_phome")
+        else:
+            email = ""
+            home = ""
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            name = st.text_input(_ui_local("导师姓名（必填）", "Professor name (required)"), key=f"{key_prefix}_pname")
+            univ = st.text_input(_ui_local("学校名称（必填）", "University (required)"), key=f"{key_prefix}_puniv")
+            country = lite_country_picker(key_prefix)
+        with c2:
+            dept = st.text_input(_ui_local("院系 / 专业", "Department"), key=f"{key_prefix}_pdept")
+            direction = st.text_input(_ui_local("研究方向", "Research direction"), key=f"{key_prefix}_pdir")
+            prio = st.selectbox(_ui_local("意向级别", "Priority"), ["T0", "T1", "T2"], index=1, key=f"{key_prefix}_pprio")
+        c3, c4 = st.columns(2)
+        with c3:
+            email = st.text_input(_ui_local("导师邮箱（选填）", "Professor email (optional)"), key=f"{key_prefix}_pemail")
+        with c4:
+            home = st.text_input(_ui_local("主页链接（选填）", "Homepage (optional)"), key=f"{key_prefix}_phome")
+    return {
+        "name": name.strip(), "univ": univ.strip(), "country": (country or "").strip(),
+        "dept": dept.strip(), "dir": direction.strip(), "prio": prio,
+        "email": email.strip(), "home": home.strip(),
+    }
+
+
+@st.dialog("新建导师 / Add Professor")
+def add_professor_dialog():
+    """浮窗：直接向导师库新增一位导师（默认未联系）。"""
+    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+    p = lite_prof_form("db_new", compact=True)
+    stage = st.selectbox(_ui_local("当前阶段", "Stage"), stage_opts, index=0, key="db_new_stage")
+    st.caption(_ui_local("已套瓷的导师建议从『邮件记录』登记，以便计入看板指标。",
+                         "For contacted professors, log them via 'Email Records' so they count in metrics."))
+    if st.button(_ui_local("添加到导师库", "Add to Professor DB"), type="primary", use_container_width=True, key="db_new_submit"):
+        if not (p["name"] and p["univ"]):
+            st.error(_ui_local("请填写导师姓名和学校名称。", "Please fill in professor name and university."))
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur = load_db()
+            cur.append({
+                "导师/教授": p["name"], "导师邮箱": p["email"], "国家/地区": p["country"] or "未知",
+                "学校名称": p["univ"], "院系": p["dept"], "主页链接": p["home"],
+                "研究方向": p["dir"] or "未明确", "推荐级": p["prio"], "阶段": stage,
+                "面试时间": "", "更新时间": now, "创建时间": now, "关联邮件ID": "",
+            })
+            save_db(cur)
+            for k in ["db_new_pname", "db_new_puniv", "db_new_pdept", "db_new_pdir",
+                      "db_new_pemail", "db_new_phome", "db_new_country_manual"]:
+                st.session_state.pop(k, None)
+            st.rerun()
 
 
 def t(key):
@@ -103,14 +245,16 @@ def get_world_universities():
 def get_recent_7d_email_stats():
     success, emails = get_cached_emails(limit=5000)
     if not success:
-        return get_recent_7d_email_stats_from_emails([])
+        emails = []
+    emails = list(emails) + load_lite_emails()
     return get_recent_7d_email_stats_from_emails(emails)
 
 
 def get_total_email_stats():
     success, emails = get_cached_emails(limit=5000)
     if not success:
-        return get_email_stats_from_emails([])
+        emails = []
+    emails = list(emails) + load_lite_emails()
     return get_email_stats_from_emails(emails)
 
 
@@ -163,18 +307,21 @@ init_background_fetch()
 st.markdown("""
 <style>
     :root {
-        --bg-main: #050a1e;
-        --bg-mid: #07163a;
-        --bg-deep: #050914;
-        --panel: rgba(21, 33, 66, 0.52);
-        --panel-strong: rgba(18, 29, 56, 0.72);
-        --line: rgba(130, 156, 214, 0.26);
-        --line-soft: rgba(102, 187, 255, 0.24);
-        --text-main: #e9f0ff;
-        --text-soft: #9aa9ca;
-        --accent: #3b82f6;
-        --ok: #35c47a;
-        --card-shadow: 0 16px 32px rgba(3, 9, 26, 0.55);
+        --bg-main: #0c0c0d;
+        --bg-sidebar: #111114;
+        --panel: #16161a;
+        --panel-strong: #1d1d22;
+        --line: #26262c;
+        --line-soft: rgba(255, 255, 255, 0.07);
+        --text-main: #ececee;
+        --text-soft: #9b9ba3;
+        --text-muted: #6b6b73;
+        --accent: #8e6bef;
+        --accent-bright: #a78bfa;
+        --accent-dim: #473b70;
+        --accent-soft: rgba(142, 107, 239, 0.16);
+        --ok: #56d197;
+        --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
     }
 
     html, body, [class*="css"] {
@@ -183,25 +330,13 @@ st.markdown("""
     }
 
     [data-testid="stAppViewContainer"] {
-        background:
-            radial-gradient(780px 460px at 30% 34%, rgba(61, 112, 255, 0.34), transparent 65%),
-            radial-gradient(760px 460px at 82% 62%, rgba(255, 121, 53, 0.24), transparent 66%),
-            linear-gradient(145deg, var(--bg-main), var(--bg-mid) 54%, var(--bg-deep));
+        background: var(--bg-main);
         color: var(--text-main);
     }
 
-    [data-testid="stAppViewContainer"]::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        background: linear-gradient(to bottom, rgba(255, 255, 255, 0.05), transparent 34%);
-    }
-
     [data-testid="stHeader"] {
-        background: rgba(14, 22, 46, 0.66);
+        background: var(--bg-main);
         border-bottom: 1px solid var(--line);
-        backdrop-filter: blur(14px) saturate(135%);
     }
 
     /* Hide Streamlit top-right actions (Deploy + overflow menu) */
@@ -211,14 +346,48 @@ st.markdown("""
         visibility: hidden !important;
     }
 
+    /* 禁止收起侧边栏：隐藏收起/展开按钮，侧边栏始终常驻 */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+
+    section[data-testid="stSidebar"],
+    [data-testid="stSidebar"] {
+        transform: none !important;
+        visibility: visible !important;
+        min-width: 244px !important;
+        width: 244px !important;
+        margin-left: 0 !important;
+    }
+
     [data-testid="stSidebar"] > div {
-        background: rgba(11, 20, 42, 0.66);
+        background: var(--bg-sidebar);
         border-right: 1px solid var(--line);
-        backdrop-filter: blur(16px) saturate(140%);
     }
 
     [data-testid="stSidebar"] * {
         color: var(--text-main) !important;
+    }
+
+    /* 品牌字体 wordmark（替代原 logo 图标） */
+    .phd-brand {
+        font-family: "SF Pro Display", "Helvetica Neue", "Segoe UI", "PingFang SC", sans-serif;
+        font-size: 30px;
+        font-weight: 800;
+        letter-spacing: -0.8px;
+        line-height: 1.15;
+        padding: 6px 0 2px;
+        color: var(--text-main) !important;
+    }
+
+    .phd-brand-accent {
+        background: linear-gradient(135deg, var(--accent-bright), var(--accent));
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent !important;
     }
 
     h1, h2, h3 {
@@ -242,11 +411,10 @@ st.markdown("""
     div[data-testid="stDateInputFieldContainer"],
     div[data-testid="stSelectbox"],
     div[data-testid="stMultiSelect"] {
-        background: linear-gradient(140deg, var(--panel), var(--panel-strong));
+        background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 14px;
-        box-shadow: var(--card-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-        backdrop-filter: blur(16px) saturate(140%);
+        box-shadow: var(--card-shadow);
     }
 
     div[data-testid="stFileUploaderDropzone"] {
@@ -256,27 +424,47 @@ st.markdown("""
 
     .stButton > button,
     .stDownloadButton > button {
-        border: 1px solid rgba(139, 170, 232, 0.34);
-        background: linear-gradient(145deg, rgba(19, 33, 66, 0.86), rgba(15, 26, 50, 0.78));
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
         color: var(--text-main);
         border-radius: 12px;
         min-height: 40px;
-        box-shadow: 0 10px 20px rgba(2, 10, 29, 0.46);
+        box-shadow: var(--card-shadow);
         transition: all 0.18s ease;
     }
 
     .stButton > button:hover,
     .stDownloadButton > button:hover {
-        transform: translateY(-1px);
-        border-color: rgba(120, 194, 255, 0.52);
-        box-shadow: 0 12px 24px rgba(2, 10, 29, 0.52);
+        border-color: var(--accent);
+        background: #24242b;
     }
 
     .stButton > button[kind="primary"] {
-        background: linear-gradient(140deg, #3d7cff, #3b82f6);
-        border: 1px solid rgba(152, 200, 255, 0.46);
+        background: var(--accent);
+        border: 1px solid var(--accent);
         color: #ffffff;
-        box-shadow: 0 14px 26px rgba(52, 120, 255, 0.32);
+        box-shadow: 0 2px 8px rgba(142, 107, 239, 0.35);
+    }
+
+    .stButton > button[kind="primary"]:hover {
+        background: var(--accent-bright);
+        border-color: var(--accent-bright);
+    }
+
+    /* 确保按钮文字清晰（覆盖 p 的灰色规则） */
+    .stButton > button p,
+    .stButton > button span,
+    .stButton > button div,
+    .stDownloadButton > button p,
+    .stDownloadButton > button span,
+    .stDownloadButton > button div {
+        color: var(--text-main) !important;
+    }
+    .stButton > button[kind="primary"],
+    .stButton > button[kind="primary"] p,
+    .stButton > button[kind="primary"] span,
+    .stButton > button[kind="primary"] div {
+        color: #ffffff !important;
     }
 
     .stRadio > div,
@@ -295,11 +483,9 @@ st.markdown("""
         width: 100%;
         min-width: 0;
         max-width: 100%;
-        border: 1px solid rgba(139, 170, 232, 0.32) !important;
+        border: 1px solid var(--line) !important;
         border-radius: 10px !important;
-        background: rgba(20, 34, 66, 0.76) !important;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
-        backdrop-filter: blur(12px) saturate(135%);
+        background: var(--panel-strong) !important;
     }
 
     .stSelectbox [data-baseweb="select"] > div,
@@ -323,11 +509,10 @@ st.markdown("""
     }
 
     .stTabs [data-baseweb="tab-list"] {
-        background: rgba(16, 28, 55, 0.66);
+        background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 12px;
         padding: 4px;
-        backdrop-filter: blur(14px) saturate(135%);
     }
 
     .stTabs [data-baseweb="tab"] {
@@ -336,16 +521,16 @@ st.markdown("""
     }
 
     .stTabs [aria-selected="true"] {
-        background: rgba(56, 104, 214, 0.46) !important;
+        background: var(--accent-soft) !important;
         color: var(--text-main) !important;
         font-weight: 700;
-        border: 1px solid rgba(122, 180, 255, 0.52);
+        border: 1px solid var(--accent);
     }
 
     hr {
         border: none;
         height: 1px;
-        background: rgba(124, 157, 219, 0.34);
+        background: var(--line);
     }
 
     .status-bar {
@@ -361,9 +546,9 @@ st.markdown("""
     .status-item {
         font-size: 12.5px;
         font-weight: 600;
-        color: #bed1f6;
-        background: rgba(20, 36, 70, 0.74);
-        border: 1px solid rgba(139, 170, 232, 0.30);
+        color: var(--text-soft);
+        background: var(--panel-strong);
+        border: 1px solid var(--line);
         padding: 6px 10px;
         border-radius: 999px;
         display: flex;
@@ -371,26 +556,43 @@ st.markdown("""
     }
 
     .status-item.active {
-        color: #e8f2ff;
-        background: rgba(62, 113, 236, 0.52);
-        border-color: rgba(150, 203, 255, 0.56);
+        color: var(--text-main);
+        background: var(--accent-soft);
+        border-color: var(--accent);
+    }
+
+    /* 回复态情感配色：积极绿 / 消极红 / 中立紫 */
+    .status-item.active.pos {
+        color: #d5f6e6;
+        background: rgba(86, 209, 151, 0.20);
+        border-color: #56d197;
+    }
+    .status-item.active.neg {
+        color: #fecaca;
+        background: rgba(248, 113, 113, 0.20);
+        border-color: #f87171;
+    }
+    .status-item.active.neu {
+        color: var(--text-main);
+        background: var(--accent-soft);
+        border-color: var(--accent);
     }
 
     .status-item.completed {
-        color: #dbffe8;
-        background: rgba(35, 126, 87, 0.58);
-        border-color: rgba(140, 245, 184, 0.48);
+        color: #d5f6e6;
+        background: rgba(86, 209, 151, 0.18);
+        border-color: rgba(86, 209, 151, 0.50);
     }
 
     .status-line {
         flex-grow: 1;
         height: 2px;
-        background-color: rgba(124, 157, 219, 0.34);
+        background-color: var(--line);
         margin: 0 8px;
     }
 
     .status-line.completed {
-        background-color: rgba(52, 196, 122, 0.76);
+        background-color: var(--ok);
     }
 
     .tag {
@@ -399,19 +601,18 @@ st.markdown("""
         border-radius: 9999px;
         font-size: 12px;
         font-weight: 600;
-        background: rgba(66, 126, 242, 0.30);
-        color: #d4e6ff;
-        border: 1px solid rgba(140, 189, 255, 0.46);
+        background: var(--accent-soft);
+        color: #d9ccff;
+        border: 1px solid var(--accent);
     }
 
     .analysis-module-card {
-        background: linear-gradient(142deg, rgba(20, 34, 66, 0.76), rgba(16, 27, 53, 0.72));
-        border: 1px solid rgba(130, 156, 214, 0.28);
+        background: var(--panel);
+        border: 1px solid var(--line);
         border-radius: 14px;
         padding: 14px 14px 10px;
         min-height: 220px;
         box-shadow: var(--card-shadow);
-        backdrop-filter: blur(16px) saturate(140%);
     }
 
     .analysis-module-head {
@@ -419,7 +620,7 @@ st.markdown("""
         align-items: center;
         gap: 8px;
         margin-bottom: 10px;
-        color: #eaf2ff;
+        color: var(--text-main);
         font-size: 15px;
         font-weight: 700;
     }
@@ -431,8 +632,8 @@ st.markdown("""
         width: 22px;
         height: 22px;
         border-radius: 999px;
-        background: rgba(59, 130, 246, 0.22);
-        border: 1px solid rgba(120, 194, 255, 0.44);
+        background: var(--accent-soft);
+        border: 1px solid var(--accent);
         font-size: 12px;
     }
 
@@ -442,14 +643,14 @@ st.markdown("""
     }
 
     .analysis-module-list li {
-        color: #a8b9dc;
+        color: var(--text-soft);
         margin: 0 0 8px;
         line-height: 1.5;
         font-size: 13.5px;
     }
 
     .analysis-empty {
-        color: #7e93bd !important;
+        color: var(--text-muted) !important;
         list-style: none;
         margin-left: -18px !important;
         font-style: italic;
@@ -459,16 +660,49 @@ st.markdown("""
     [data-testid="stTextAreaRootElement"] textarea,
     [data-testid="stDateInputFieldContainer"] input {
         color: var(--text-main) !important;
-        background: rgba(20, 34, 66, 0.80) !important;
-        border: 1px solid rgba(139, 170, 232, 0.34) !important;
+        background: var(--panel-strong) !important;
+        border: 1px solid var(--line) !important;
         border-radius: 10px !important;
     }
 
     [data-testid="stTextInputRootElement"] input:focus,
     [data-testid="stTextAreaRootElement"] textarea:focus,
     [data-testid="stDateInputFieldContainer"] input:focus {
-        border-color: rgba(112, 193, 255, 0.66) !important;
-        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.22) !important;
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px rgba(142, 107, 239, 0.25) !important;
+    }
+
+    div[data-testid="stMetric"] {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 14px 10px;
+    }
+
+    /* 看板「回复分布」合并小格子 */
+    .reply-box {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: var(--card-shadow);
+        padding: 14px 10px;
+        text-align: center;
+        height: 100%;
+    }
+    .reply-box-label {
+        color: var(--text-soft);
+        font-size: 0.85rem;
+        margin-bottom: 8px;
+    }
+    .reply-box-nums {
+        display: flex;
+        justify-content: space-around;
+        gap: 6px;
+        flex-wrap: wrap;
+        font-weight: 700;
+        font-size: 1.0rem;
     }
 
     div[data-testid="stMetric"] > div,
@@ -516,10 +750,31 @@ st.markdown("""
     div[data-testid="stDialog"] div[role="dialog"] {
         width: min(1200px, 95vw);
         border-radius: 16px;
-        border: 1px solid rgba(130, 156, 214, 0.34);
-        background: rgba(14, 25, 50, 0.84);
-        box-shadow: 0 18px 40px rgba(2, 10, 29, 0.62);
-        backdrop-filter: blur(20px) saturate(145%);
+        border: 1px solid var(--line);
+        background: var(--panel);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.62);
+    }
+
+    /* 卡片式容器（st.container(border=True)，用于导师库卡片） */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--panel);
+        border: 1px solid var(--line) !important;
+        border-radius: 14px;
+        padding: 6px 4px;
+    }
+
+    /* 导师库卡片内文字提亮（避免灰色看不清） */
+    [data-testid="stVerticalBlockBorderWrapper"] p,
+    [data-testid="stVerticalBlockBorderWrapper"] small,
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaptionContainer"],
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaptionContainer"] * {
+        color: #d6d8de !important;
+    }
+
+    /* 内容贴顶，减少顶部空白 */
+    .block-container,
+    [data-testid="stMainBlockContainer"] {
+        padding-top: 2.2rem !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -528,28 +783,107 @@ st.markdown("""
 # 数据获取
 # ==========================================
 
-@st.dialog("🚨 确认删除 / Confirm Delete")
+def purge_lite_emails_for_record(record):
+    """删除导师记录时，连带移除它关联的 Lite 手动邮件，使看板指标同步更新。"""
+    linked = str((record or {}).get("关联邮件ID", "") or "").strip()
+    if not linked or linked == "None":
+        return
+    ids = {x.strip() for x in linked.split(",") if x.strip() and x.strip() != "None"}
+    if not ids:
+        return
+    lite = load_lite_emails()
+    new_lite = [em for em in lite if str(em.get("id", "")) not in ids]
+    if len(new_lite) != len(lite):
+        save_lite_emails(new_lite)
+
+
+_STAGE_ORDER = {s: i for i, s in enumerate(
+    ["未联系", "已发首封邮件", "收到消极回复", "收到中等回复", "收到积极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+)}
+
+
+def _merge_prof(a, b):
+    """把 b 合并进 a：保留更靠前的阶段、并集关联邮件ID、补全空白字段。"""
+    out = dict(a)
+    if _STAGE_ORDER.get(b.get("阶段", "未联系"), 0) > _STAGE_ORDER.get(out.get("阶段", "未联系"), 0):
+        out["阶段"] = b.get("阶段", out.get("阶段"))
+        out["面试时间"] = b.get("面试时间", out.get("面试时间", ""))
+    for f in ["导师邮箱", "国家/地区", "院系", "主页链接", "研究方向", "推荐级", "面试时间"]:
+        cur = str(out.get(f, "")).strip()
+        if cur in ("", "未知", "未明确", "None"):
+            nv = str(b.get(f, "")).strip()
+            if nv and nv not in ("未知", "未明确", "None"):
+                out[f] = b.get(f)
+    ids = []
+    for src in (a, b):
+        for x in str(src.get("关联邮件ID", "") or "").split(","):
+            x = x.strip()
+            if x and x != "None" and x not in ids:
+                ids.append(x)
+    out["关联邮件ID"] = ",".join(ids)
+    if str(b.get("更新时间", "")) > str(out.get("更新时间", "")):
+        out["更新时间"] = b.get("更新时间")
+    return out
+
+
+def dedupe_db(db):
+    """按（导师姓名 + 学校名称）去重合并，保持原顺序。返回 (新列表, 是否有变化)。"""
+    seen = {}
+    result = []
+    changed = False
+    for r in db:
+        name = str(r.get("导师/教授", "")).strip().lower()
+        univ = str(r.get("学校名称", "")).strip().lower()
+        key = (name, univ) if name else None
+        if key is not None and key in seen:
+            idx = seen[key]
+            result[idx] = _merge_prof(result[idx], r)
+            changed = True
+        else:
+            if key is not None:
+                seen[key] = len(result)
+            result.append(dict(r))
+    return result, changed
+
+
+def dedupe_db_inplace():
+    """加载导师库并就地去重（仅在确有重复时写回）。"""
+    db = load_db()
+    deduped, changed = dedupe_db(db)
+    if changed:
+        save_db(deduped)
+
+
+@st.dialog("从看板移除 / Remove from board")
 def confirm_delete_dialog(prof_name, univ_name, delete_idx=None):
-    st.warning(tr(f"确定要永久删除 **{prof_name}** ({univ_name}) 的申请记录吗？此操作不可恢复。",
-                  f"Permanently delete application record for **{prof_name}** ({univ_name})? This cannot be undone."))
+    st.warning(tr(f"将 **{prof_name}** ({univ_name}) 移出套瓷看板？\n\n导师仍保留在导师库中，状态会重置为「未联系」，关联的邮件记录会被清除。",
+                  f"Remove **{prof_name}** ({univ_name}) from the board?\n\nThe professor stays in the Professor DB, the stage resets to '未联系', and linked email records are cleared."))
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button(tr("✖️ 返回 / 取消", "✖️ Back / Cancel"), use_container_width=True):
+        if st.button(tr("返回 / 取消", "Back / Cancel"), use_container_width=True):
             st.rerun()
     with c2:
-        if st.button(tr("🗑️ 确认删除", "🗑️ Confirm Delete"), use_container_width=True, type="primary"):
+        if st.button(tr("移出看板", "Remove from board"), use_container_width=True, type="primary"):
             current_db = load_db()
             if delete_idx is not None and 0 <= delete_idx < len(current_db):
-                current_db.pop(delete_idx)
-                save_db(current_db)
+                targets = [delete_idx]
             else:
-                new_db = [r for r in current_db if not (r.get("导师/教授") == prof_name and r.get("学校名称") == univ_name)]
-                save_db(new_db)
-            st.success(tr("✅ 删除成功！", "✅ Deleted successfully!"))
+                targets = [i for i, r in enumerate(current_db)
+                           if r.get("导师/教授") == prof_name and r.get("学校名称") == univ_name]
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for i in targets:
+                purge_lite_emails_for_record(current_db[i])
+                current_db[i]["阶段"] = "未联系"
+                current_db[i]["面试时间"] = ""
+                current_db[i]["关联邮件ID"] = ""
+                current_db[i]["更新时间"] = now_str
+            save_db(current_db)
+            st.success(tr("已移出看板（导师保留在导师库，状态为未联系）。",
+                          "Removed from board (kept in Professor DB as 未联系)."))
             st.rerun()
 
 
-@st.dialog("📄 简历预览 / Resume Preview")
+@st.dialog("简历预览 / Resume Preview")
 def show_resume_pdf_modal(pdf_path, title="简历"):
     st.markdown(f"**{title}**")
     if pdf_path and os.path.exists(pdf_path):
@@ -585,32 +919,42 @@ def render_status_bar(current_status, interview_time=""):
     }
     
     current_index = step_mapping.get(current_status, 0)
-    statuses = ["未联系", "首封邮件", "收到回复", "面试环节", "口头offer"]
-    
-    if current_status in ["收到积极回复", "收到中等回复", "收到消极回复"]:
-        statuses[2] = current_status.replace("收到", "")
+    en = st.session_state.get("app_lang", "zh-CN") == "en"
+    statuses = (["Not contacted", "First email", "Reply", "Interview", "Offer"] if en
+                else ["未联系", "首封邮件", "收到回复", "面试环节", "口头offer"])
+
+    reply_label = {
+        "收到积极回复": ("Positive" if en else "积极回复"),
+        "收到中等回复": ("Neutral" if en else "中等回复"),
+        "收到消极回复": ("Negative" if en else "消极回复"),
+    }
+    if current_status in reply_label:
+        statuses[2] = reply_label[current_status]
     elif current_index > 2:
-        statuses[2] = "收回复"
-        
+        statuses[2] = ("Replied" if en else "收回复")
+
     if current_status == "面试预约阶段":
         import math
         iv_time = "" if interview_time is None or (isinstance(interview_time, float) and math.isnan(interview_time)) else str(interview_time)
         time_str = f"<br/><span style='font-size:10.5px;color:#f59e0b;'>{iv_time}</span>" if iv_time else ""
-        statuses[3] = f"预约{time_str}" 
+        statuses[3] = (f"Scheduled{time_str}" if en else f"预约{time_str}")
     elif current_status == "面试结束阶段":
-        statuses[3] = "结束"
+        statuses[3] = ("Done" if en else "结束")
         
     html_parts = ["<div class='status-bar'>"]
     
+    sentiment_class = {"收到积极回复": " pos", "收到消极回复": " neg", "收到中等回复": " neu"}
     for i, status in enumerate(statuses):
+        extra = ""
         if i < current_index:
             state_class, icon = "completed", "✓"
         elif i == current_index:
             state_class, icon = "active", "◉"
+            extra = sentiment_class.get(current_status, "")
         else:
             state_class, icon = "", "○"
-            
-        html_parts.append(f"<div class='status-item {state_class}'>{icon} {status}</div>")
+
+        html_parts.append(f"<div class='status-item {state_class}{extra}'>{icon} {status}</div>")
         
         if i < len(statuses) - 1:
             line_class = "completed" if i < current_index else ""
@@ -658,7 +1002,7 @@ def get_active_resume_text(cfg):
     return resume_text
 
 
-@st.dialog("🎭 AI 模拟面试官 / Mock Interview")
+@st.dialog("AI 模拟面试官 / Mock Interview")
 def show_mock_interview_dialog(idx, row):
     prof_name = row.get("导师/教授", tr("未知导师", "Unknown Professor"))
     univ_name = row.get("学校名称", tr("未知学校", "Unknown University"))
@@ -764,12 +1108,12 @@ def show_mock_interview_dialog(idx, row):
             st.markdown(f"#### {tr('对话记录', 'Conversation')}")
             for turn_idx, turn in enumerate(chat_items):
                 if turn.get("role") == "candidate":
-                    st.markdown(f"**{tr('🧑‍🎓 你：', '🧑‍🎓 You:')}** {turn.get('content', '')}")
+                    st.markdown(f"**{tr('你：', 'You:')}** {turn.get('content', '')}")
                 else:
                     q_text = str(turn.get("content", "")).strip()
                     q_col, mark_col = st.columns([8.8, 1.2])
                     with q_col:
-                        st.markdown(f"**{tr('👨‍🏫 面试官：', '👨‍🏫 Interviewer:')}** {q_text}")
+                        st.markdown(f"**{tr('面试官：', 'Interviewer:')}** {q_text}")
                     with mark_col:
                         if st.button(tr("标记", "Mark"), key=f"mock_mark_hf_{idx}_{turn_idx}", help=tr("标记为高频考察点", "Mark as high-frequency question")):
                             ok_mark, msg_mark = _save_high_frequency_point(q_text)
@@ -805,7 +1149,7 @@ def show_mock_interview_dialog(idx, row):
                 st.warning(tr("请先输入你的回答。", "Please enter your answer first."))
             else:
                 chat.append({"role": "candidate", "content": answer})
-                live_chat_prefix = f"**{tr('🧑‍🎓 你：', '🧑‍🎓 You:')}** {answer}\n\n"
+                live_chat_prefix = f"**{tr('你：', 'You:')}** {answer}\n\n"
                 live_reply_placeholder.markdown(live_chat_prefix)
                 st.session_state[input_nonce_key] = int(st.session_state.get(input_nonce_key, 0)) + 1
                 next_input_key = f"{input_key_prefix}_{st.session_state[input_nonce_key]}"
@@ -827,11 +1171,11 @@ def show_mock_interview_dialog(idx, row):
                     for ch in str(reply):
                         rendered += ch
                         live_reply_placeholder.markdown(
-                            live_chat_prefix + f"**{tr('👨‍🏫 面试官：', '👨‍🏫 Interviewer:')}** {rendered}▌"
+                            live_chat_prefix + f"**{tr('面试官：', 'Interviewer:')}** {rendered}▌"
                         )
                         time.sleep(0.012)
                     live_reply_placeholder.markdown(
-                        live_chat_prefix + f"**{tr('👨‍🏫 面试官：', '👨‍🏫 Interviewer:')}** {rendered}"
+                        live_chat_prefix + f"**{tr('面试官：', 'Interviewer:')}** {rendered}"
                     )
                     chat.append({"role": "interviewer", "content": reply})
                     st.session_state[state_key] = chat
@@ -902,81 +1246,85 @@ def show_mock_interview_dialog(idx, row):
         render_analysis_modules(
             tr("面试复盘", "Interview Review"),
             [
-                ("✅", tr("表现亮点", "Strengths"), strengths),
-                ("⚠️", tr("主要短板", "Weaknesses"), weaknesses),
-                ("🛠️", tr("改进建议", "Improvements"), improvements),
+                ("", tr("表现亮点", "Strengths"), strengths),
+                ("", tr("主要短板", "Weaknesses"), weaknesses),
+                ("", tr("改进建议", "Improvements"), improvements),
             ],
         )
 
 
-@st.dialog("🎯 导师档案及邮件记录")
+@st.dialog("导师档案及邮件记录")
 def show_professor_details(row):
-    st.markdown(f"#### {row.get('导师/教授', '未知导师')} | 🏛️ {row.get('学校名称', '未知学校')}")
+    st.markdown(f"#### {row.get('导师/教授', _ui_local('未知导师', 'Unknown'))} | {row.get('学校名称', _ui_local('未知学校', 'Unknown'))}")
     c1, c2, c3 = st.columns(3)
-    with c1: st.write(f"🏷️ **{row.get('推荐级', '未知')}级**")
-    with c2: st.write(f"🏢 **{row.get('院系', '未分类')}**")
-    with c3: st.write(f"💼 **{row.get('阶段', '未开始')}**")
-    
-    st.write(f"🔬 **研究方向:** `{row.get('研究方向', '未明确')}`")
-    
+    with c1: st.write(f"**{row.get('推荐级', '-')}**")
+    with c2: st.write(f"**{row.get('院系', '-')}**")
+    with c3: st.write(f"**{row.get('阶段', '-')}**")
+
+    st.write(f"**{_ui_local('研究方向', 'Research')}:** `{row.get('研究方向', _ui_local('未明确', 'N/A'))}`")
+
     if row.get("导师邮箱"):
-        st.write(f"📧 **联系邮箱:** `{row.get('导师邮箱')}`")
-    
-    
+        st.write(f"**{_ui_local('联系邮箱', 'Email')}:** `{row.get('导师邮箱')}`")
+
     if row.get('主页链接'):
-        st.markdown(f"🔗 **个人主页:** [{row.get('主页链接')}]({row.get('主页链接')})")
+        st.markdown(f"**{_ui_local('个人主页', 'Homepage')}:** [{row.get('主页链接')}]({row.get('主页链接')})")
         
     st.markdown("---")
     
     prof_email = row.get("导师邮箱")
     email_id = row.get("关联邮件ID")
-    
-    success, emails = get_cached_emails(limit=2000)
-    
-    if not success or not emails:
-        st.warning("🤷‍♂️ 未能从本地缓存加载邮件列表。")
+    prof_name = row.get("导师/教授", "")
+
+    # 合并 IMAP 缓存邮件 + Lite 手动邮件
+    cached_ok, cached = get_cached_emails(limit=2000)
+    all_emails = (cached if cached_ok and cached else []) + load_lite_emails()
+
+    pe_clean = prof_email.strip().lower() if prof_email else ""
+    manual_ids = set(x.strip() for x in str(email_id or "").split(",") if x.strip() and x.strip() != "None")
+
+    thread_mails = []
+    thread_mail_ids = set()
+    for m in all_emails:
+        mid = str(m.get("id", ""))
+        matched = False
+        if pe_clean and (pe_clean in str(m.get("from", "")).lower() or pe_clean in str(m.get("to", "")).lower()):
+            matched = True
+        if mid and mid in manual_ids:
+            matched = True
+        if prof_name and str(m.get("linked_prof", "")) == prof_name:
+            matched = True
+        if matched and (not mid or mid not in thread_mail_ids):
+            thread_mails.append(m)
+            if mid:
+                thread_mail_ids.add(mid)
+
+    # 按时间正序（最旧在上）
+    from email.utils import parsedate_to_datetime
+
+    def _mdt(m):
+        try:
+            dt = parsedate_to_datetime(m.get("date", ""))
+            if dt is not None:
+                return dt.timestamp()
+        except Exception:
+            pass
+        return 0.0
+    thread_mails.sort(key=_mdt)
+
+    cat_tag = {1: "已发送套磁信", 2: "积极回复", 3: "消极回复", 4: "中立回复", 5: "面试预约", 6: "面试结束", 7: "口头Offer"}
+    if thread_mails:
+        st.markdown(f"##### {_ui_local('往来邮件记录', 'Correspondence')} ({len(thread_mails)})")
+        for idx, tm in enumerate(thread_mails):
+            tag = cat_tag.get(tm.get("phd_category"), "")
+            header = f"{tm.get('date', '')}  ·  {tag}" if tag else f"{tm.get('date', '')}"
+            with st.expander(header, expanded=(idx == len(thread_mails) - 1)):
+                st.caption(f"**From:** `{tm.get('from', '')}`  |  **To:** `{tm.get('to', '')}`")
+                body = tm.get("body", "") or ""
+                if body.strip():
+                    st.text_area("body", body, height=160, disabled=True, label_visibility="collapsed",
+                                 key=f"thread_{prof_name}_{tm.get('id')}_{idx}")
     else:
-        # 第一优先级：根据导师的邮箱串联所有往来邮件
-        thread_mails = []
-        thread_mail_ids = set()
-        
-        if prof_email:
-            # simple matching
-            pe_clean = prof_email.strip().lower()
-            for m in emails:
-                m_from = m.get('from', '').lower()
-                m_to = m.get('to', '').lower()
-                if pe_clean in m_from or pe_clean in m_to:
-                    thread_mails.append(m)
-                    if m.get("id"):
-                        thread_mail_ids.add(str(m.get("id")))
-        
-        # 第二优先级：补充手动关联的邮件（支持逗号分隔的多个ID）
-        if email_id:
-            manual_ids = [x.strip() for x in str(email_id).split(",") if x.strip()]
-            for mid in manual_ids:
-                if mid not in thread_mail_ids:
-                    target_mail = next((m for m in emails if str(m.get("id")) == mid), None)
-                    if target_mail:
-                        thread_mails.append(target_mail)
-                        thread_mail_ids.add(mid)
-        
-        if thread_mails:
-            # 邮箱按照时间正序排列（最旧的在上面，最新的在下面），方便像聊天一样看
-            st.markdown(f"##### 💬 往来邮件对话记录 (共 {len(thread_mails)} 封)")
-            
-            # 由于 IMAP 获取通常是最新在前面，反转一下变成时间正序
-            thread_mails.reverse()
-            
-            for idx, tm in enumerate(thread_mails):
-                with st.expander(f"✉️ {tm.get('date', '')} - {tm.get('subject', '无标题')}", expanded=(idx == len(thread_mails)-1)):
-                    st.caption(f"**From:** `{tm.get('from', '')}` | **To:** `{tm.get('to', '')}`")
-                    st.text_area("邮件内容", tm.get('body', ''), height=200, disabled=True, label_visibility="collapsed", key=f"thread_{row.get('导师/教授', '未知')}_{tm.get('id')}_{idx}")
-        else:
-            if not prof_email and not email_id:
-                st.info("📌 该记录未绑定邮箱或关联邮件。")
-            else:
-                st.warning("🤷‍♂️ 未能找到该邮箱或该ID的任何往来通讯，可能太久远了！")
+        st.info(_ui_local("该导师暂无往来邮件记录。", "No correspondence for this professor yet."))
 
 # ==========================================
 # 主界面构建
@@ -989,35 +1337,81 @@ def main():
         st.session_state["app_lang"] = "zh-CN"
     if st.session_state.get("app_lang") not in ("zh-CN", "en"):
         st.session_state["app_lang"] = "zh-CN"
-        
-    _, lang_col = st.columns([8, 2])
-    with lang_col:
-        lang_options = {
-            "zh-CN": "中文",
-            "en": "English",
-        }
-        st.selectbox("Language", 
-                     options=list(lang_options.keys()), 
-                     format_func=lambda x: lang_options[x],
-                     key="app_lang",
-                     label_visibility="collapsed")
+
+    # 导师库去重（同名+同校自动合并）
+    dedupe_db_inplace()
 
     # 侧边栏导航
     with st.sidebar:
-        st.image("fig/logo.png", width=180)
+        st.markdown(
+            "<div class='phd-brand'>PhD<span class='phd-brand-accent'>Hub</span></div>",
+            unsafe_allow_html=True,
+        )
         st.caption(ui("AI 智能博士申请辅助系统", "AI-Powered PhD Application Assistant"))
+
+        lang_options = {"zh-CN": "中文", "en": "English"}
+        st.selectbox(ui("语言 / Language", "语言 / Language"),
+                     options=list(lang_options.keys()),
+                     format_func=lambda x: lang_options[x],
+                     key="app_lang")
+
+        # Lite 轻量模式开关（记忆到本地配置）
+        if "lite_mode" not in st.session_state:
+            st.session_state["lite_mode"] = bool(load_config().get("lite_mode", False))
+
+        def _on_lite_toggle():
+            cfg = load_config()
+            cfg["lite_mode"] = bool(st.session_state.get("lite_mode_toggle", False))
+            save_config(cfg)
+            st.session_state["lite_mode"] = cfg["lite_mode"]
+
+        st.toggle(
+            ui("Lite 轻量模式", "Lite Mode"),
+            value=st.session_state["lite_mode"],
+            key="lite_mode_toggle",
+            on_change=_on_lite_toggle,
+            help=ui("仅保留套瓷看板、邮件记录与导师库，关闭邮箱与 AI 功能。数据仅保存在本地以保障隐私。",
+                    "Keeps only the Dashboard, Email Records and Professor DB; email & AI are off. Data stays local for privacy."),
+        )
+        lite_mode = st.session_state["lite_mode"]
+
         resume_menu_label = ui("我的简历", "My Resume")
         rp_menu_label = ui("我的RP", "My RP")
         settings_menu_label = ui("系统配置", "System Config")
-        menu_items = [resume_menu_label, rp_menu_label, t("menu_dashboard"), t("menu_email"), t("menu_db"), t("menu_interview"), settings_menu_label]
-        menu = st.radio(t("nav_menu"), menu_items, index=0)
-        
-        st.info(ui("💡 **提示**: 用户数据仅保存在本地以保障隐私。", "💡 **Tip**: User data is stored locally for privacy."))
+        lite_email_label = ui("邮件记录", "Email Records")
+        data_mgmt_label = ui("资料管理", "Data Management")
+
+        # 用稳定的页面 id 作为导航选项，切换语言时保持当前页面不变
+        label_map = {
+            "resume": resume_menu_label,
+            "rp": rp_menu_label,
+            "dashboard": t("menu_dashboard"),
+            "email": (lite_email_label if lite_mode else t("menu_email")),
+            "db": t("menu_db"),
+            "interview": t("menu_interview"),
+            "settings": settings_menu_label,
+            "data": data_mgmt_label,
+        }
+        if lite_mode:
+            page_ids = ["dashboard", "email", "db", "data"]
+        else:
+            page_ids = ["resume", "rp", "dashboard", "email", "db", "interview", "settings"]
+
+        cur_id = st.session_state.get("nav_page_id", page_ids[0])
+        if cur_id not in page_ids:
+            cur_id = page_ids[0]
+        menu_id = st.radio(
+            t("nav_menu"), page_ids, index=page_ids.index(cur_id),
+            format_func=lambda pid: label_map.get(pid, pid),
+            key=f"nav_radio_{'lite' if lite_mode else 'full'}",
+        )
+        st.session_state["nav_page_id"] = menu_id
+        menu = label_map[menu_id]
 
     # 主体内容
     if menu == resume_menu_label:
         st.title(ui("我的简历", "My Resume"))
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 1rem;'>{ui('上传 PDF 后将自动保存、自动设为当前简历并自动分析。', 'After PDF upload, it is saved automatically, set as active, and analyzed by AI.')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>{ui('上传 PDF 后将自动保存、自动设为当前简历并自动分析。', 'After PDF upload, it is saved automatically, set as active, and analyzed by AI.')}</p>", unsafe_allow_html=True)
 
         cfg = load_config()
         resumes = list_resumes()
@@ -1223,15 +1617,15 @@ def main():
                 render_analysis_modules(
                     ui("AI 简历分析", "AI Resume Analysis"),
                     [
-                        ("✅", ui("申博优势", "Strengths"), analysis.get("strengths", [])),
-                        ("⚠️", ui("申博劣势", "Weaknesses"), analysis.get("weaknesses", [])),
-                        ("🛠️", ui("改进建议", "Improvements"), analysis.get("improvements", [])),
+                        ("", ui("申博优势", "Strengths"), analysis.get("strengths", [])),
+                        ("", ui("申博劣势", "Weaknesses"), analysis.get("weaknesses", [])),
+                        ("", ui("改进建议", "Improvements"), analysis.get("improvements", [])),
                     ],
                 )
 
     elif menu == rp_menu_label:
         st.title(ui("我的RP", "My RP"))
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 1rem;'>{ui('上传 RP PDF 后自动分析：写得好的点、缺陷、改进建议。', 'After RP PDF upload, AI analyzes strengths, issues, and improvements.')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>{ui('上传 RP PDF 后自动分析：写得好的点、缺陷、改进建议。', 'After RP PDF upload, AI analyzes strengths, issues, and improvements.')}</p>", unsafe_allow_html=True)
 
         cfg = load_config()
         rps = list_rps()
@@ -1371,38 +1765,61 @@ def main():
                 render_analysis_modules(
                     ui("AI RP 分析", "AI RP Analysis"),
                     [
-                        ("✅", ui("优点", "Strengths"), rp_strengths),
-                        ("⚠️", ui("缺点", "Weaknesses"), rp_weaknesses),
-                        ("🛠️", ui("改进建议", "Improvements"), rp_improvements),
+                        ("", ui("优点", "Strengths"), rp_strengths),
+                        ("", ui("缺点", "Weaknesses"), rp_weaknesses),
+                        ("", ui("改进建议", "Improvements"), rp_improvements),
                     ],
                 )
 
     elif menu == t("menu_dashboard"):
         st.title(ui("套瓷进度大盘", "Outreach Dashboard"))
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 2rem;'>{ui('可视化管理你与各大院校导师的沟通时间线。', 'Visualize and manage your communication timeline with professors.')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 2rem;'>{ui('可视化管理你与各大院校导师的沟通时间线。', 'Visualize and manage your communication timeline with professors.')}</p>", unsafe_allow_html=True)
         
         recent_stats = get_recent_7d_email_stats()
         total_stats = get_total_email_stats()
         recent_scheduled_count = get_recent_7d_scheduled_interviews_count()
         interview_scheduled_total = len([r for r in load_db() if r.get("阶段") == "面试预约阶段"])
 
-        st.markdown(f"### 📈 {ui('最近 7 天套瓷沟通指标', 'Last 7 Days Outreach Metrics')}")
-        k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric(ui("已发送套瓷信", "Inquiries Sent"), recent_stats["sent_inquiry"])
-        k2.metric(ui("收到回复", "Replies"), recent_stats["replied_total"])
-        k3.metric(ui("收到积极回复", "Positive"), recent_stats["positive_reply"])
-        k4.metric(ui("收到消极回复", "Negative"), recent_stats["negative_reply"])
-        k5.metric(ui("收到中立回复", "Neutral"), recent_stats["neutral_reply"])
-        k6.metric(ui("已预约面试", "Interviews Scheduled"), recent_scheduled_count)
+        def _stat_box(label, items):
+            spans = "".join(f"<span style='color:{c}'>{txt} {val}</span>" for txt, val, c in items)
+            return (
+                "<div class='reply-box'>"
+                f"<div class='reply-box-label'>{label}</div>"
+                f"<div class='reply-box-nums'>{spans}</div>"
+                "</div>"
+            )
 
-        st.markdown(f"### 📚 {ui('累计套瓷沟通指标', 'All-Time Outreach Metrics')}")
-        t1, t2, t3, t4, t5, t6 = st.columns(6)
-        t1.metric(ui("累计已发送", "Sent"), total_stats["sent_inquiry"])
-        t2.metric(ui("累计收到回复", "Replies"), total_stats["replied_total"])
-        t3.metric(ui("累计积极回复", "Positive"), total_stats["positive_reply"])
-        t4.metric(ui("累计消极回复", "Negative"), total_stats["negative_reply"])
-        t5.metric(ui("累计中立回复", "Neutral"), total_stats["neutral_reply"])
-        t6.metric(ui("已预约面试", "Interviews Scheduled"), interview_scheduled_total)
+        def _outreach_box(stats, scheduled):
+            return _stat_box(ui("套瓷进度", "Outreach"), [
+                (ui("已发送", "Sent"), stats["sent_inquiry"], "#a78bfa"),
+                (ui("已回复", "Replied"), stats["replied_total"], "#ececee"),
+                (ui("面试", "Interview"), scheduled, "#56d197"),
+            ])
+
+        def _reply_box(stats):
+            return _stat_box(ui("回复分布", "Reply breakdown"), [
+                (ui("积极", "Pos"), stats["positive_reply"], "#56d197"),
+                (ui("中立", "Neu"), stats["neutral_reply"], "#ececee"),
+                (ui("消极", "Neg"), stats["negative_reply"], "#f87171"),
+            ])
+
+        col_recent, col_total = st.columns(2)
+
+        with col_recent:
+            st.markdown(f"### {ui('最近 7 天套瓷沟通指标', 'Last 7 Days Outreach Metrics')}")
+            rc = st.columns(2)
+            with rc[0]:
+                st.markdown(_outreach_box(recent_stats, recent_scheduled_count), unsafe_allow_html=True)
+            with rc[1]:
+                st.markdown(_reply_box(recent_stats), unsafe_allow_html=True)
+
+        with col_total:
+            st.markdown(f"### {ui('累计套瓷沟通指标', 'All-Time Outreach Metrics')}")
+            ac = st.columns(2)
+            with ac[0]:
+                st.markdown(_outreach_box(total_stats, interview_scheduled_total), unsafe_allow_html=True)
+            with ac[1]:
+                st.markdown(_reply_box(total_stats), unsafe_allow_html=True)
         st.divider()
         
         # 加载数据
@@ -1433,9 +1850,10 @@ def main():
             if 'index' in daily_creates.columns:
                 daily_creates.rename(columns={'index': '日期'}, inplace=True)
             
-            fig_bar = px.bar(daily_creates, x='日期', y='发信数量', title="📊 最近 7 天套瓷发送数量 (按创建时间)", 
-                             color_discrete_sequence=['#3b82f6'], text='发信数量')
-            fig_bar.update_layout(xaxis_title="日期", yaxis_title="发信数量", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+            fig_bar = px.bar(daily_creates, x='日期', y='发信数量', title="最近 7 天套瓷发送数量 (按创建时间)",
+                             color_discrete_sequence=['#8e6bef'], text='发信数量')
+            fig_bar.update_layout(xaxis_title="日期", yaxis_title="发信数量", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                                  font=dict(color='#ececee'))
             
             # Chart 2: Global Map
             import pycountry
@@ -1465,24 +1883,32 @@ def main():
             import plotly.graph_objects as go
             fig_map = px.choropleth(map_df, locations="iso_alpha",
                                     color="总套瓷数", hover_name="hover_text",
-                                    color_continuous_scale=px.colors.sequential.YlOrRd,
+                                    color_continuous_scale=[[0, '#1d1d22'], [0.5, '#473b70'], [1, '#8e6bef']],
                                     range_color=[1, 100],
-                                    title="🌍 全球套瓷地区分布图")
+                                    title="全球套瓷地区分布图")
             
-            # 标出 Top 5 并在地图上醒目突出（解决小面积地区在填色地图上看不见的问题）
-            top_5 = map_df.nlargest(5, '总套瓷数')
-            fig_map.add_trace(go.Scattergeo(
-                locations=top_5['iso_alpha'],
-                text=top_5['国家/地区'] + " (" + top_5['总套瓷数'].astype(str) + ")",
-                mode='markers+text',
-                marker=dict(size=12, color='#10b981', line=dict(width=2, color='white')),
-                textfont=dict(color='white', size=13, weight='bold'),
-                textposition="bottom center",
-                showlegend=False
-            ))
+            # 为所有有 ISO 编码的地区都打上气泡点，确保香港/新加坡等小面积地区也能显示
+            pt_df = map_df[map_df['iso_alpha'].notna() & (map_df['iso_alpha'].astype(str) != "")].copy()
+            if not pt_df.empty:
+                counts = pt_df['总套瓷数'].astype(float)
+                cmax = counts.max() if counts.max() > 0 else 1
+                sizes = 11 + (counts / cmax) * 20  # 11~31，按套瓷数缩放
+                fig_map.add_trace(go.Scattergeo(
+                    locations=pt_df['iso_alpha'],
+                    text=pt_df['国家/地区'] + " (" + pt_df['总套瓷数'].astype(int).astype(str) + ")",
+                    mode='markers+text',
+                    marker=dict(size=sizes, color='#a78bfa', opacity=0.9,
+                                line=dict(width=1.5, color='#ececee')),
+                    textfont=dict(color='#ececee', size=12),
+                    textposition="top center",
+                    hoverinfo="text",
+                    showlegend=False
+                ))
 
-            fig_map.update_layout(geo=dict(showframe=False, showcoastlines=True, bgcolor='rgba(0,0,0,0)'),
-                                  paper_bgcolor='rgba(0,0,0,0)')
+            fig_map.update_layout(geo=dict(showframe=False, showcoastlines=True, bgcolor='rgba(0,0,0,0)',
+                                           landcolor='#16161a', lakecolor='#0c0c0d', coastlinecolor='#26262c',
+                                           showland=True, showocean=True, oceancolor='#0c0c0d'),
+                                  paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#ececee'))
                                   
             c_chart1, c_chart2 = st.columns(2)
             with c_chart1:
@@ -1493,11 +1919,38 @@ def main():
             st.divider()
         
         st.subheader(t("active_applications"))
-        
+
+        # 看板只展示已进入套瓷流程的导师；未联系的仅保留在导师库
+        if "阶段" in df.columns:
+            active_df = df[df["阶段"].astype(str) != "未联系"]
+        else:
+            active_df = df
+
+        # 大洲 / 国家 筛选
+        all_label = ui("全部", "All")
+        fcol1, fcol2, _fc = st.columns([1, 1, 4])
+        with fcol1:
+            cont_sel = st.selectbox(ui("大洲", "Continent"), [all_label] + list(CONTINENTS.keys()), key="dash_cont")
+        with fcol2:
+            if cont_sel != all_label:
+                country_pool = list(CONTINENTS.get(cont_sel, []))
+            else:
+                country_pool = sorted({str(c) for c in active_df.get("国家/地区", pd.Series(dtype=str)).tolist() if str(c).strip()})
+            country_sel = st.selectbox(ui("国家 / 地区", "Country / Region"), [all_label] + country_pool,
+                                       format_func=lambda c: COUNTRY_LABELS.get(c, c), key="dash_country")
+        if cont_sel != all_label and "国家/地区" in active_df.columns:
+            active_df = active_df[active_df["国家/地区"].isin(CONTINENTS.get(cont_sel, []))]
+        if country_sel != all_label and "国家/地区" in active_df.columns:
+            active_df = active_df[active_df["国家/地区"].astype(str) == country_sel]
+
+        if active_df.empty:
+            st.caption(ui("暂无进行中的套瓷记录。未联系的导师可在『导师库管理』中查看。",
+                          "No active outreach yet. Un-contacted professors live in the Professor DB."))
+
         # 为每位导师渲染卡片
-        for index, row in df.iterrows():
-            
-            c1, c2, c3 = st.columns([1, 2, 1])
+        for index, row in active_df.iterrows():
+
+            c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="center")
             with c1:
                 prof_name = row.get('导师/教授', '未知导师')
                 homepage = row.get('主页链接', '')
@@ -1505,27 +1958,325 @@ def main():
                     st.markdown(f"### <a href='{homepage}' target='_blank' style='text-decoration:none; color:inherit;'>{prof_name}</a>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"### {prof_name}")
-                st.markdown(f"**🏛️ {row.get('学校名称', '未知学校')}**")
-                st.markdown(f"<span class='tag'>{row.get('推荐级', '未知')} 级</span>", unsafe_allow_html=True)
-                
+                st.markdown(f"**{row.get('学校名称', ui('未知学校', 'Unknown'))}**")
+                st.markdown(f"<span class='tag'>{row.get('推荐级', '-')}</span>", unsafe_allow_html=True)
+
             with c2:
                 # 渲染用户要求的进度条
                 render_status_bar(row.get('阶段', '未联系'), row.get('面试时间', ''))
-                
+
             with c3:
-                st.markdown(f"**🔬 研究方向:**<br><span style='font-size:15px; color:#d6e4ff; font-weight:600;'>{row.get('研究方向', '未明确')}</span>", unsafe_allow_html=True)
-                st.markdown(f"**⏱️ 最后互动:** {row.get('更新时间', '')}")
-                st.markdown(f"**🕒 导师当地时间:** {format_local_time(row.get('国家/地区', ''))}")
+                st.markdown(f"**{ui('研究方向', 'Research')}:**<br><span style='font-size:15px; color:#d6e4ff; font-weight:600;'>{row.get('研究方向', ui('未明确', 'N/A'))}</span>", unsafe_allow_html=True)
+                st.markdown(f"**{ui('最后互动', 'Last update')}:** {row.get('更新时间', '')}")
+                st.markdown(f"**{ui('导师当地时间', 'Local time')}:** {format_local_time(row.get('国家/地区', '')).replace('未知', ui('未知', 'Unknown'))}")
                 # 操作按钮
                 btn_col1, btn_col2 = st.columns(2)
                 with btn_col1:
-                    if st.button(ui("👁️ 查看详情", "👁️ Details"), key=f"btn_{index}", use_container_width=True):
+                    if st.button(ui("查看详情", "Details"), key=f"btn_{index}", use_container_width=True):
                         show_professor_details(row)
                 with btn_col2:
-                    if st.button(ui("🗑️ 删除记录", "🗑️ Delete"), key=f"del_dash_{index}", use_container_width=True, type="secondary"):
+                    if st.button(ui("删除记录", "Delete"), key=f"del_dash_{index}", use_container_width=True, type="secondary"):
                         confirm_delete_dialog(row.get("导师/教授"), row.get("学校名称"))
             
             
+    elif menu == data_mgmt_label:
+        st.title(ui("资料管理", "Data Management"))
+        if st.session_state.pop("data_cleared_flag", False):
+            st.success(ui("✓ 已成功清空所有资料（导师库与邮件记录均已删除）。",
+                          "✓ All data cleared successfully (Professor DB and email records removed)."))
+        st.markdown(
+            f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>"
+            f"{ui('备份、导入或清空你的全部本地数据（导师库 + 邮件记录）。', 'Back up, import, or clear all your local data (Professor DB + email records).')}</p>",
+            unsafe_allow_html=True,
+        )
+
+        st.subheader(ui("备份资料", "Backup"))
+        st.caption(ui("一键导出全部资料为 JSON 文件（导师库 + 邮件记录）。", "Export everything as one JSON file (Professor DB + email records)."))
+        backup_payload = json.dumps({
+            "version": 1,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "professors": load_db(),
+            "emails": load_lite_emails(),
+        }, ensure_ascii=False, indent=2)
+        st.download_button(
+            ui("备份资料（导出全部）", "Backup (export all)"),
+            data=backup_payload.encode("utf-8"),
+            file_name=f"phdhub_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            type="primary",
+            key="data_backup_btn",
+        )
+
+        st.caption(ui("或：另存为到本机指定路径（自定义保存位置）。", "Or: save directly to a custom path on this machine."))
+        default_save_path = os.path.join(os.path.expanduser("~"), f"phdhub_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        sp1, sp2 = st.columns([3, 1])
+        with sp1:
+            save_path = st.text_input(ui("保存路径", "Save path"), value=default_save_path, key="data_save_path", label_visibility="collapsed")
+        with sp2:
+            if st.button(ui("另存为", "Save as"), key="data_saveas_btn", use_container_width=True):
+                try:
+                    target = os.path.expanduser(save_path.strip())
+                    parent = os.path.dirname(target)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(target, "w", encoding="utf-8") as _bf:
+                        _bf.write(backup_payload)
+                    st.success(ui(f"已保存到：{target}", f"Saved to: {target}"))
+                except Exception as e:
+                    st.error(ui(f"保存失败：{e}", f"Save failed: {e}"))
+
+        st.divider()
+        st.subheader(ui("导入资料", "Import"))
+        up = st.file_uploader(ui("选择备份文件 (JSON)", "Backup file (JSON)"), type=["json"], key="data_import_file")
+        replace_label = ui("清空后导入", "Replace all")
+        merge_label = ui("合并导入（保留现有）", "Merge (keep existing)")
+        imp_mode = st.radio(ui("导入方式", "Import mode"), [merge_label, replace_label], horizontal=True, key="data_import_mode")
+        if up is not None and st.button(ui("执行导入", "Import"), key="data_import_btn"):
+            try:
+                payload = json.loads(up.getvalue().decode("utf-8"))
+                imp_profs = payload.get("professors", []) or []
+                imp_mails = payload.get("emails", []) or []
+                if imp_mode == replace_label:
+                    save_db(imp_profs)
+                    save_lite_emails(imp_mails)
+                else:
+                    merged_db, _ = dedupe_db(load_db() + imp_profs)
+                    save_db(merged_db)
+                    cur_mails = load_lite_emails()
+                    seen_ids = {str(m.get("id")) for m in cur_mails}
+                    cur_mails.extend(m for m in imp_mails if str(m.get("id")) not in seen_ids)
+                    save_lite_emails(cur_mails)
+                st.success(ui("导入成功！", "Imported successfully!"))
+                st.rerun()
+            except Exception as e:
+                st.error(ui(f"导入失败：{e}", f"Import failed: {e}"))
+
+        st.divider()
+        st.subheader(ui("清空所有资料", "Clear all data"))
+        st.caption(ui("将永久删除所有导师库与邮件记录，不可恢复。建议先备份。",
+                      "Permanently deletes all professors and email records. Back up first."))
+        clear_phrase = ui("确认清空", "CLEAR")
+        typed = st.text_input(ui(f"输入「{clear_phrase}」以启用", f"Type '{clear_phrase}' to enable"), key="data_clear_confirm")
+        if st.button(ui("清空所有资料", "Clear all data"), disabled=(typed.strip() != clear_phrase), key="data_clear_btn"):
+            save_db([])
+            save_lite_emails([])
+            st.session_state.pop("data_clear_confirm", None)
+            st.session_state["data_cleared_flag"] = True
+            st.rerun()
+
+    elif menu == lite_email_label:
+        st.title(lite_email_label)
+        st.markdown(
+            f"<p style='color: #9b9ba3; margin-bottom: 1.5rem;'>"
+            f"{ui('手动记录一封邮件并联动套瓷看板，无需邮箱授权与任何 AI 功能。', 'Log an email by hand and sync it to the dashboard — no email auth or AI needed.')}</p>",
+            unsafe_allow_html=True,
+        )
+
+        _lite_saved = st.session_state.pop("lite_saved_msg", None)
+        if _lite_saved:
+            st.success("✓ " + _lite_saved)
+            st.balloons()
+
+        cat_to_status = {1: "已发首封邮件", 2: "收到积极回复", 3: "收到消极回复", 4: "收到中等回复", 5: "面试预约阶段", 6: "面试结束阶段", 7: "口头offer"}
+        cat_options = [
+            (1, ui("已发送套磁信（首次联系）", "Inquiry sent (first contact)")),
+            (2, ui("收到积极回复", "Positive reply")),
+            (4, ui("收到中立回复", "Neutral reply")),
+            (3, ui("收到消极回复", "Negative reply")),
+            (5, ui("面试预约", "Interview scheduled")),
+            (6, ui("面试结束", "Interview done")),
+            (7, ui("口头 Offer", "Verbal offer")),
+        ]
+        cat_label_map = dict(cat_options)
+
+        lc_form, _lc_rest = st.columns([3, 2])
+        with lc_form:
+            st.subheader(ui("新建邮件记录", "New email record"))
+
+            db = load_db()
+            sel_idx = None
+            new_prof = None
+            fc_create_label = ui("新建导师", "Create new professor")
+            fc_pick_label = ui("从导师库选择", "Pick from Professor DB")
+            fc_mode = fc_create_label
+
+            # 一行：邮件类型 + 导师来源 + 发件人
+            sender_me = ui("我", "Me")
+            sender_prof = ui("教授", "Professor")
+            top_a, top_b, top_c = st.columns(3)
+            with top_a:
+                cat_id = st.selectbox(
+                    ui("这封邮件是什么？", "What is this email?"),
+                    options=[c for c, _ in cat_options],
+                    format_func=lambda c: cat_label_map.get(c, str(c)),
+                    key="lite_cat",
+                )
+            is_first_contact = (cat_id == 1)
+            with top_b:
+                if is_first_contact:
+                    fc_mode = st.radio(ui("导师来源", "Professor source"), [fc_create_label, fc_pick_label],
+                                       horizontal=True, key="lite_fc_mode")
+            with top_c:
+                sender = st.radio(ui("发件人", "Sender"), [sender_me, sender_prof],
+                                  index=(0 if is_first_contact else 1), horizontal=True, key="lite_sender")
+
+            if is_first_contact:
+                if fc_mode == fc_create_label:
+                    new_prof = lite_prof_form("lite_new", compact=True, show_contact=False)
+                elif not db:
+                    st.warning(ui("导师库为空，请改用『新建导师』，或先到『导师库管理』里添加。",
+                                  "Professor DB is empty. Use 'Create new professor', or add one on the Professor DB page."))
+                else:
+                    prof_options = {f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')}) · {r.get('阶段', '未联系')}": i for i, r in enumerate(db)}
+                    sel_str = st.selectbox(ui("选择导师库中的导师", "Select a professor from the DB"), list(prof_options.keys()), key="lite_fc_selprof")
+                    sel_idx = prof_options[sel_str]
+            else:
+                if not db:
+                    st.warning(ui("导师库为空，请先用『已发送套磁信』登记一位导师。",
+                                  "Professor DB is empty. Add a professor via 'Inquiry sent' first."))
+                else:
+                    prof_options = {f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')})": i for i, r in enumerate(db)}
+                    sel_str = st.selectbox(ui("选择已有导师", "Select existing professor"), list(prof_options.keys()), key="lite_selprof")
+                    sel_idx = prof_options[sel_str]
+            creating = bool(is_first_contact and fc_mode == fc_create_label)
+
+            interview_time = ""
+            if cat_id == 5:
+                dft_date, dft_time = get_interview_picker_defaults("")
+                ci1, ci2 = st.columns(2)
+                with ci1:
+                    iv_date = st.date_input(ui("面试日期", "Interview date"), value=dft_date, key="lite_ivdate")
+                with ci2:
+                    iv_time = st.time_input(ui("面试时间", "Interview time"), value=dft_time, key="lite_ivtime")
+                interview_time = format_interview_time(iv_date, iv_time)
+
+            st.text_area(ui("邮件正文 / 备注（选填）", "Email body / notes (optional)"), key="lite_body", height=120)
+
+            # 一行：导师邮箱 / 主页链接 / 邮件日期（新建导师时三项同行；否则仅邮件日期）
+            if creating and new_prof is not None:
+                rc = st.columns(3)
+                with rc[0]:
+                    new_prof["email"] = st.text_input(ui("导师邮箱（选填）", "Professor email (optional)"), key="lite_new_pemail").strip()
+                with rc[1]:
+                    new_prof["home"] = st.text_input(ui("主页链接（选填）", "Homepage (optional)"), key="lite_new_phome").strip()
+                with rc[2]:
+                    lite_date = st.date_input(ui("邮件日期", "Email date"), value=datetime.now().date(), key="lite_date")
+            else:
+                lite_date = st.date_input(ui("邮件日期", "Email date"), value=datetime.now().date(), key="lite_date")
+
+            if st.button(ui("保存到套瓷看板", "Save to dashboard"), type="primary", use_container_width=True, key="lite_save"):
+                ok = True
+                if creating:
+                    if not (new_prof and new_prof["name"] and new_prof["univ"]):
+                        st.error(ui("请填写导师姓名和学校名称。", "Please fill in professor name and university."))
+                        ok = False
+                elif sel_idx is None:
+                    st.error(ui("请选择一位导师。", "Please select a professor."))
+                    ok = False
+
+                if ok:
+                    from email.utils import format_datetime as _fmt_dt
+                    dt_aware = datetime.combine(lite_date, datetime.now().time()).astimezone()
+                    mail_date_rfc = _fmt_dt(dt_aware)
+                    created_str = dt_aware.strftime("%Y-%m-%d %H:%M:%S")
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    my_email = load_config().get("email", "") or "me"
+                    mail_id = "lite-" + datetime.now().strftime("%Y%m%d%H%M%S%f")
+
+                    if creating:
+                        prof_name = new_prof["name"]
+                        prof_email = new_prof["email"]
+                    else:
+                        sel_r = db[sel_idx]
+                        prof_name = sel_r.get("导师/教授", "")
+                        prof_email = sel_r.get("导师邮箱", "")
+
+                    counter = prof_email or prof_name
+                    # 发件人由用户选择：我 / 教授
+                    em_from, em_to = (my_email, counter) if sender == sender_me else (counter, my_email)
+
+                    lite_rec = {
+                        "id": mail_id,
+                        "subject": st.session_state.get("lite_subject", "").strip(),
+                        "from": em_from,
+                        "to": em_to,
+                        "date": mail_date_rfc,
+                        "body": st.session_state.get("lite_body", "").strip(),
+                        "is_phd_related": True,
+                        "phd_category": cat_id,
+                        "phd_reasoning": "manual (Lite)",
+                        "phd_details": {},
+                        "lite_manual": True,
+                        "linked_prof": prof_name,
+                    }
+                    lite_list = load_lite_emails()
+                    lite_list.insert(0, lite_rec)
+                    save_lite_emails(lite_list)
+
+                    cur_db = load_db()
+                    if creating:
+                        cur_db.append({
+                            "导师/教授": prof_name,
+                            "导师邮箱": prof_email,
+                            "国家/地区": new_prof["country"] or "未知",
+                            "学校名称": new_prof["univ"],
+                            "院系": new_prof["dept"],
+                            "主页链接": new_prof["home"],
+                            "研究方向": new_prof["dir"] or "未明确",
+                            "推荐级": new_prof["prio"],
+                            "阶段": cat_to_status[cat_id],
+                            "面试时间": interview_time,
+                            "更新时间": now_str,
+                            "创建时间": created_str,
+                            "关联邮件ID": mail_id,
+                        })
+                        save_db(cur_db)
+                        st.session_state["lite_saved_msg"] = ui(f"已登记导师 {prof_name} 并加入套瓷看板。", f"Added {prof_name} to the dashboard.")
+                        for k in ["lite_new_pname", "lite_new_puniv", "lite_new_pdept", "lite_new_pdir",
+                                  "lite_new_pemail", "lite_new_phome", "lite_new_country_manual", "lite_subject", "lite_body"]:
+                            st.session_state.pop(k, None)
+                    else:
+                        cur_db[sel_idx]["阶段"] = cat_to_status[cat_id]
+                        if interview_time:
+                            cur_db[sel_idx]["面试时间"] = interview_time
+                        cur_db[sel_idx]["更新时间"] = now_str
+                        old_mid = str(cur_db[sel_idx].get("关联邮件ID", "")).strip()
+                        cur_db[sel_idx]["关联邮件ID"] = f"{old_mid},{mail_id}" if old_mid and old_mid != "None" else mail_id
+                        save_db(cur_db)
+                        st.session_state["lite_saved_msg"] = ui(f"已更新 {prof_name} 的阶段为「{cat_to_status[cat_id]}」。", f"Updated {prof_name} -> {cat_to_status[cat_id]}.")
+                        for k in ["lite_subject", "lite_body"]:
+                            st.session_state.pop(k, None)
+                    st.rerun()
+
+        st.divider()
+        st.subheader(ui("已有邮件记录", "Email records"))
+        cat_name_map = {
+            1: ui("已发送套磁信", "Inquiry sent"), 2: ui("积极回复", "Positive"), 3: ui("消极回复", "Negative"),
+            4: ui("中立回复", "Neutral"), 5: ui("面试预约", "Interview scheduled"), 6: ui("面试结束", "Interview done"),
+            7: ui("口头Offer", "Verbal offer"),
+        }
+        lite_list = load_lite_emails()
+        if not lite_list:
+            st.caption(ui("还没有手动邮件记录。", "No manual email records yet."))
+        else:
+            for i, em in enumerate(lite_list):
+                cc1, cc2 = st.columns([5, 1])
+                with cc1:
+                    prof_title = em.get("linked_prof") or ui("(未关联导师)", "(no professor)")
+                    st.markdown(
+                        f"**{html.escape(prof_title)}**  ·  <span class='tag'>{cat_name_map.get(em.get('phd_category'), '?')}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"{em.get('date', '')}")
+                    body = (em.get("body") or "").strip()
+                    if body:
+                        st.caption(body[:200] + ("…" if len(body) > 200 else ""))
+                with cc2:
+                    if st.button(ui("删除", "Delete"), key=f"lite_del_{em.get('id', i)}", use_container_width=True):
+                        save_lite_emails([x for x in load_lite_emails() if x.get("id") != em.get("id")])
+                        st.rerun()
+                st.divider()
+
     elif menu == t("menu_email"):
         st.title(t("email_center"))
         config = load_config()
@@ -1573,10 +2324,10 @@ def main():
                         subj = emails[idx]['subject'][:15].replace('\n', ' ')
                         m_id = emails[idx]['id']
                         if m_id in marked_emails:
-                            return f"✅ {subj}..."
+                            return f"{subj}..."
                         if emails[idx].get('is_phd_related'):
-                            return f"🎓 {subj}..."
-                        return f"📩 {subj}..."
+                            return f"{subj}..."
+                        return f"{subj}..."
                         
                     selected_idx = st.radio(t("switch_email"), range(len(emails)), format_func=format_email_label, label_visibility="collapsed", key="email_list_selector")
                 
@@ -1587,8 +2338,8 @@ def main():
                     if mail_id in marked_emails:
                         col_alert, col_action = st.columns([4, 1.5])
                         with col_alert:
-                            st.success(ui(f"🎉 **已提取！** 导师：`{marked_emails[mail_id]}`",
-                                          f"🎉 **Extracted!** Professor: `{marked_emails[mail_id]}`"))
+                            st.success(ui(f"**已提取！** 导师：`{marked_emails[mail_id]}`",
+                                          f"**Extracted!** Professor: `{marked_emails[mail_id]}`"))
                         with col_action:
                             if st.button(t("cancel"), key=f"unmark_{mail_id}", use_container_width=True):
                                 current_db = load_db()
@@ -1619,7 +2370,7 @@ def main():
                     
                     current_cat = mail.get('phd_category') if mail.get('is_phd_related') and mail.get('phd_category') in CAT_NAMES else 0
                     
-                    new_cat = st.selectbox(ui("📌 邮件分类状态", "📌 Email Category"), 
+                    new_cat = st.selectbox(ui("邮件分类状态", "Email Category"), 
                                            options=list(CAT_NAMES.keys()), 
                                            format_func=lambda x: CAT_NAMES[x],
                                            index=list(CAT_NAMES.keys()).index(current_cat),
@@ -1645,7 +2396,7 @@ def main():
                                         if updated:
                                             with open(EMAILS_CACHE_FILE, "w", encoding="utf-8") as fw:
                                                 json.dump(cache_data, fw, ensure_ascii=False)
-                                            st.toast(ui("✅ 状态已自动修改并保存！即将刷新...", "✅ Category updated and saved. Refreshing..."))
+                                            st.toast(ui("状态已自动修改并保存！即将刷新...", "Category updated and saved. Refreshing..."))
                                             import time
                                             time.sleep(0.5)
                                             st.rerun()
@@ -1660,22 +2411,22 @@ def main():
                         st.markdown("---")
                         st.write(t("email_body"))
                         st.text_area(t("email_body"), mail['body'], height=450, key=f"email_body_{mail_id}", label_visibility="collapsed")
-                        st.caption(ui("👈 最左侧菜单栏可以点击顶部的 `>` 或 `X` 隐藏以获得更大视野。",
-                                      "👈 Click `>` or `X` on the left sidebar to hide it for a wider workspace."))
+                        st.caption(ui("最左侧菜单栏可以点击顶部的 `>` 或 `X` 隐藏以获得更大视野。",
+                                      "Click `>` or `X` on the left sidebar to hide it for a wider workspace."))
                         
                         # Phase 3 Verification Display
                         phd_details = mail.get("phd_details", {})
                         verification_result = phd_details.get("verification_result") if isinstance(phd_details, dict) else None
                         if verification_result:
-                            st.markdown(f"### {ui('🕷️ URL防幻觉网页抓取与二次审核', '🕷️ URL Hallucination Check & Verification')}")
+                            st.markdown(f"### {ui('URL防幻觉网页抓取与二次审核', 'URL Hallucination Check & Verification')}")
                             st.info(ui(f"**尝试抓取的导师主页:** {phd_details.get('scraped_url', '')}",
                                        f"**Fetched URL:** {phd_details.get('scraped_url', '')}"))
                             scraped_text = verification_result.get("scraped_text", "")
                             if scraped_text:
-                                with st.expander(ui("📄 爬取到的网页纯净脱水文本 (点击查看)", "📄 Cleaned Web Text (click to view)")):
+                                with st.expander(ui("爬取到的网页纯净脱水文本 (点击查看)", "Cleaned Web Text (click to view)")):
                                     st.code(scraped_text, language="text")
                             
-                            st.markdown(f"#### {ui('🧠 AI 审查与提取过程', '🧠 AI Review & Extraction')}")
+                            st.markdown(f"#### {ui('AI 审查与提取过程', 'AI Review & Extraction')}")
                             is_real = verification_result.get('is_real_homepage')
                             ai_reasoning = verification_result.get('reasoning', '')
                             ai_keywords = verification_result.get('research_keywords', '')
@@ -1691,13 +2442,13 @@ def main():
                     reasoning_col, thinking_col = st.columns(2)
                     
                     with reasoning_col:
-                        st.markdown(f"### {ui('🔍 邮件分类分析', '🔍 Email Classification')}")
+                        st.markdown(f"### {ui('邮件分类分析', 'Email Classification')}")
                         reasoning = mail.get("phd_reasoning")
                         if reasoning:
                             st.info(reasoning)
                             
                     with thinking_col:
-                        st.markdown(f"### {ui('🧠 信息抽取分析', '🧠 Information Extraction')}")
+                        st.markdown(f"### {ui('信息抽取分析', 'Information Extraction')}")
                         thinking_box = st.empty()
                         if f"thinking_{mail_id}" in st.session_state:
                             thinking_box.success(st.session_state[f"thinking_{mail_id}"])
@@ -1725,8 +2476,8 @@ def main():
                         if t_url and t_url != "None":
                             top_default_url = t_url
                     
-                    st.info(ui("💡 **提取必备**：为了精准抽取导师档案并将内容入库，本系统限制必须通过导师官方网页抓取。\n**请先在此提供真实的导师主页链接**：",
-                               "💡 **Required for extraction**: To ensure reliable professor profiling and storage, extraction is limited to official webpages.\n**Please provide a real homepage URL first**:"))
+                    st.info(ui("**提取必备**：为了精准抽取导师档案并将内容入库，本系统限制必须通过导师官方网页抓取。\n**请先在此提供真实的导师主页链接**：",
+                               "**Required for extraction**: To ensure reliable professor profiling and storage, extraction is limited to official webpages.\n**Please provide a real homepage URL first**:"))
                     hp_input_col, hp_btn_col = st.columns([2.9, 1.1])
                     with hp_input_col:
                         manual_hp_url = st.text_input(
@@ -1742,14 +2493,14 @@ def main():
 
                     if ai_extract_clicked:
                         if not manual_hp_url.startswith("http"):
-                            st.warning(ui("⚠️ 必须要填写真实的导师个人主页链接 (请以 http 或 https 开头) 才能进行解析并展示录入表单！",
-                                          "⚠️ A valid professor homepage URL (http/https) is required for extraction."))
+                            st.warning(ui("必须要填写真实的导师个人主页链接 (请以 http 或 https 开头) 才能进行解析并展示录入表单！",
+                                          "A valid professor homepage URL (http/https) is required for extraction."))
                         elif ai_provider == "Google Gemini" and not api_key:
-                            st.warning(ui("⚠️ 请先前往【系统配置】填写 Gemini API Key", "⚠️ Please set Gemini API Key in System Config first."))
+                            st.warning(ui("请先前往【系统配置】填写 Gemini API Key", "Please set Gemini API Key in System Config first."))
                         elif ai_provider == "通义千问 (Qwen)" and not qwen_key:
-                            st.warning(ui("⚠️ 请先前往【系统配置】填写 通义千问 API Key", "⚠️ Please set Qwen API Key in System Config first."))
+                            st.warning(ui("请先前往【系统配置】填写 通义千问 API Key", "Please set Qwen API Key in System Config first."))
                         else:
-                            with st.spinner(f"🚀 {ai_provider} 正在阅读邮件、分析背景..."):
+                            with st.spinner(f"{ai_provider} 正在阅读邮件、分析背景..."):
                                 try:
                                     if ai_provider == "Google Gemini":
                                         genai.configure(api_key=api_key)
@@ -1763,17 +2514,17 @@ def main():
                                         import re
                                         try:
                                             req = urllib.request.Request(manual_hp_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0)'})
-                                            html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='ignore')
-                                            raw_html = html
-                                            t_text = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL|re.IGNORECASE)
+                                            page_html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='ignore')
+                                            raw_html = page_html
+                                            t_text = re.sub(r'<style.*?>.*?</style>', '', page_html, flags=re.DOTALL|re.IGNORECASE)
                                             t_text = re.sub(r'<script.*?>.*?</script>', '', t_text, flags=re.DOTALL|re.IGNORECASE)
                                             t_text = re.sub(r'<[^>]+>', ' ', t_text)
                                             t_text = re.sub(r'\s+', ' ', t_text).strip()
                                             web_text = t_text[:5000]
-                                            st.session_state[f"thinking_{mail_id}"] += f"✅ **成功爬取纯净网页文本({len(web_text)}字符)。开始投喂大模型...**\n\n---\n"
+                                            st.session_state[f"thinking_{mail_id}"] += f"**成功爬取纯净网页文本({len(web_text)}字符)。开始投喂大模型...**\n\n---\n"
                                             thinking_box.info(st.session_state[f"thinking_{mail_id}"])
                                         except Exception as e:
-                                            st.session_state[f"thinking_{mail_id}"] += f"❌ 网页请求失败: {str(e)}\n\n---\n"
+                                            st.session_state[f"thinking_{mail_id}"] += f"网页请求失败: {str(e)}\n\n---\n"
                                             thinking_box.error(st.session_state[f"thinking_{mail_id}"])
                                             
                                         prompt = f"""
@@ -1842,7 +2593,7 @@ def main():
                                         thinking_box.success(res_text)
                                     else:
                                         response, used_model = _gemini_generate_content_with_fallback(prompt, stream=True)
-                                        st.session_state[f"thinking_{mail_id}"] += f"🤖 Gemini model: `{used_model}`\n\n"
+                                        st.session_state[f"thinking_{mail_id}"] += f"Gemini model: `{used_model}`\n\n"
                                         for chunk in response:
                                             chunk_text = getattr(chunk, "text", "") or ""
                                             if not chunk_text:
@@ -1867,7 +2618,7 @@ def main():
                                     # [Phase 3 UI Interaction: URL Verification]
                                     inferred_hp = data.get("homepage", "")
                                     if cat_id != 1 and inferred_hp and inferred_hp != "None" and inferred_hp.startswith("http"):
-                                        st.session_state[f"thinking_{mail_id}"] += f"\n\n---\n\n### 🕷️ URL防幻觉探针介入\n\nAI 首次回答中提供了 URL: `{inferred_hp}`。\n\n**正在发起代码级探针爬取...**\n"
+                                        st.session_state[f"thinking_{mail_id}"] += f"\n\n---\n\n### URL防幻觉探针介入\n\nAI 首次回答中提供了 URL: `{inferred_hp}`。\n\n**正在发起代码级探针爬取...**\n"
                                         thinking_box.info(st.session_state[f"thinking_{mail_id}"])
                                         
                                         valid_res = verify_professor_homepage(inferred_hp, mail.get("to", ""), config)
@@ -1879,13 +2630,13 @@ def main():
                                         # Show Secondary AI verification result
                                         ai_reasoning = valid_res.get("reasoning", "")
                                         if valid_res.get("is_real_homepage"):
-                                            st.session_state[f"thinking_{mail_id}"] += f"✅ **AI 二次确权通过!**\n- **推理过程:** {ai_reasoning}\n- **重新总结研究点:** {valid_res.get('research_keywords', '')}"
+                                            st.session_state[f"thinking_{mail_id}"] += f"**AI 二次确权通过!**\n- **推理过程:** {ai_reasoning}\n- **重新总结研究点:** {valid_res.get('research_keywords', '')}"
                                             thinking_box.success(st.session_state[f"thinking_{mail_id}"])
                                             
                                             # Override with more accurate data
                                             data["research"] = valid_res.get("research_keywords", data.get("research"))
                                         else:
-                                            st.session_state[f"thinking_{mail_id}"] += f"\n\n❌ **AI 二次确权驳回 (属于假连接或无权限):**\n- {ai_reasoning}\n\n系统已强制清空该幻觉 URL。"
+                                            st.session_state[f"thinking_{mail_id}"] += f"\n\n**AI 二次确权驳回 (属于假连接或无权限):**\n- {ai_reasoning}\n\n系统已强制清空该幻觉 URL。"
                                             thinking_box.error(st.session_state[f"thinking_{mail_id}"])
                                             data["homepage"] = ""
                                     
@@ -1958,7 +2709,7 @@ def main():
                                     ai_univ = data.get("university", "")
                                     world_univ_data = get_world_universities()
                                     
-                                    matched_country = "🔽 [不在列表中] 手动补充"
+                                    matched_country = "[不在列表中] 手动补充"
                                     matched_univ = "不在对应院校列表中..."
                                     
                                     if ai_country:
@@ -1967,7 +2718,7 @@ def main():
                                                 matched_country = c_key
                                                 break
                                                 
-                                    if matched_country != "🔽 [不在列表中] 手动补充" and ai_univ:
+                                    if matched_country != "[不在列表中] 手动补充" and ai_univ:
                                         univ_list = world_univ_data.get(matched_country, [])
                                         for u in univ_list:
                                             if ai_univ.lower() == u.lower() or ai_univ.lower() in u.lower() or u.lower() in ai_univ.lower() or ai_univ.replace("The ", "").lower() in u.lower():
@@ -1975,14 +2726,14 @@ def main():
                                                 break
                                                 
                                     st.session_state[f"country_{mail_id}"] = matched_country
-                                    if matched_country != "🔽 [不在列表中] 手动补充":
+                                    if matched_country != "[不在列表中] 手动补充":
                                         if matched_univ != "不在对应院校列表中...":
                                             st.session_state[f"univ_{mail_id}"] = matched_univ
                                             st.session_state[f"mc_{mail_id}"] = ""
                                             st.session_state[f"mu_{mail_id}"] = ""
                                         else:
                                             # 如果国家选出来了但学校没匹配上，依然切回手动模式，让用户检查
-                                            st.session_state[f"country_{mail_id}"] = "🔽 [不在列表中] 手动补充"
+                                            st.session_state[f"country_{mail_id}"] = "[不在列表中] 手动补充"
                                             st.session_state[f"mc_{mail_id}"] = ai_country
                                             st.session_state[f"mu_{mail_id}"] = ai_univ
                                     else:
@@ -2019,12 +2770,12 @@ def main():
                                     st.rerun()
                                     
                                 except Exception as e:
-                                    st.error(ui(f"❌ 解析未成功，可能是 API 密钥无效或解析格式错误: {str(e)}",
-                                                f"❌ Extraction failed. Possible invalid API key or malformed response: {str(e)}"))
+                                    st.error(ui(f"解析未成功，可能是 API 密钥无效或解析格式错误: {str(e)}",
+                                                f"Extraction failed. Possible invalid API key or malformed response: {str(e)}"))
                     # ===================================================
 
                     world_univ_data = get_world_universities()
-                    country_list = ["🔽 [不在列表中] 手动补充"] + sorted(list(world_univ_data.keys()))
+                    country_list = ["[不在列表中] 手动补充"] + sorted(list(world_univ_data.keys()))
                     
                     # 将这几个常申大国置顶显示以方便查找
                     priority_countries = ["United States", "United Kingdom", "Hong Kong", "Singapore", "Canada", "Australia", "China"]
@@ -2099,8 +2850,8 @@ def main():
                         default_action_idx = 0 # 数据库为空，强制回退至新建模式
                     
                     # 动态级联选择不使用 st.form，使用普通 layout 以支持联动的交互刷新
-                    action_mode = st.radio("🔖 记录操作模式", ["➕ 新建导师记录", "🔄 同步至已有导师"], index=default_action_idx, horizontal=True, key=f"radio_mode_{mail_id}")
-                    if action_mode == "➕ 新建导师记录":
+                    action_mode = st.radio("记录操作模式", ["新建导师记录", "同步至已有导师"], index=default_action_idx, horizontal=True, key=f"radio_mode_{mail_id}")
+                    if action_mode == "新建导师记录":
                         with st.container():
                             col_p1, col_p2 = st.columns(2)
                             with col_p1:
@@ -2120,7 +2871,7 @@ def main():
                             )
                             
                             univ_options = ["不在对应院校列表中..."]
-                            if selected_country != "🔽 [不在列表中] 手动补充":
+                            if selected_country != "[不在列表中] 手动补充":
                                 univ_options = world_univ_data.get(selected_country, ["不在对应院校列表中..."])
                                 
                             u_idx = 0
@@ -2136,7 +2887,7 @@ def main():
                             
                             manual_country = ""
                             manual_univ = ""
-                            if selected_country == "🔽 [不在列表中] 手动补充":
+                            if selected_country == "[不在列表中] 手动补充":
                                 col_m1, col_m2 = st.columns([1, 2])
                                 with col_m1:
                                     manual_country = st.text_input(t("manual_country"), value=default_country if default_country else "", placeholder="例: 荷兰", key=f"mc_{mail_id}")
@@ -2167,10 +2918,10 @@ def main():
                             
                             direction = st.text_input("导师研究方向 (Keywords)", value=default_dir, key=f"dir_{mail_id}")
                             
-                            if st.button("💾 保存进度至看板", use_container_width=True, key=f"submit_{mail_id}", type="primary"):
+                            if st.button("保存进度至看板", use_container_width=True, key=f"submit_{mail_id}", type="primary"):
                                 # 解析最终数据
-                                final_country = manual_country.strip() if selected_country == "🔽 [不在列表中] 手动补充" else selected_country
-                                final_univ = manual_univ.strip() if selected_country == "🔽 [不在列表中] 手动补充" else selected_univ
+                                final_country = manual_country.strip() if selected_country == "[不在列表中] 手动补充" else selected_country
+                                final_univ = manual_univ.strip() if selected_country == "[不在列表中] 手动补充" else selected_univ
     
                                 if prof_name and final_univ:
                                     current_db = load_db()
@@ -2216,9 +2967,9 @@ def main():
                                         new_row["最近论文"] = papers
                                         new_row["最近论文更新时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                         save_db(current_db)
-                                        st.success(f"✅ 成功! {prof_name} 已加入大盘，并自动抓取 {len(papers)} 篇最近论文。")
+                                        st.success(f"成功! {prof_name} 已加入大盘，并自动抓取 {len(papers)} 篇最近论文。")
                                     else:
-                                        st.success(f"✅ 成功! {prof_name} 已加入大盘。")
+                                        st.success(f"成功! {prof_name} 已加入大盘。")
                                         st.info("已尝试自动抓取最近论文，但暂未成功（可能被 Scholar 限流/验证码影响）。")
                                     st.rerun()
                                 else:
@@ -2239,7 +2990,7 @@ def main():
                                             preselect_prof_idx = i
                                             break
                                             
-                                sel_prof_str = st.selectbox("🎯 选择要同步关联的导师", list(prof_options.keys()), index=preselect_prof_idx, key=f"sel_prof_{mail_id}")
+                                sel_prof_str = st.selectbox("选择要同步关联的导师", list(prof_options.keys()), index=preselect_prof_idx, key=f"sel_prof_{mail_id}")
                                 sel_idx = prof_options[sel_prof_str]
                                 sel_r = current_db[sel_idx]
                                 
@@ -2255,19 +3006,19 @@ def main():
                                 }
                                 new_status = cat_to_status_name.get(cat_id, cur_stat)
                                 
-                                st.info(f"📍 **同步后，导师当前申请阶段将自动更新为：** `{new_status}` (取自上方修正确认的邮件分类)")
+                                st.info(f"**同步后，导师当前申请阶段将自动更新为：** `{new_status}` (取自上方修正确认的邮件分类)")
                                 
                                 new_time = sel_r.get("面试时间", "")
                                 if new_status == "面试预约阶段":
                                     dft_date, dft_time = get_interview_picker_defaults(new_time)
                                     c_dt1, c_dt2 = st.columns(2)
                                     with c_dt1:
-                                        new_date = st.date_input("📅 面试日期", value=dft_date, key=f"new_intv_date_{mail_id}")
+                                        new_date = st.date_input("面试日期", value=dft_date, key=f"new_intv_date_{mail_id}")
                                     with c_dt2:
-                                        new_clock = st.time_input("⏰ 面试时间", value=dft_time, key=f"new_intv_time_{mail_id}")
+                                        new_clock = st.time_input("面试时间", value=dft_time, key=f"new_intv_time_{mail_id}")
                                     new_time = format_interview_time(new_date, new_clock)
                                 
-                                if st.button("🔄 同步更新进度并接管本邮件", use_container_width=True, key=f"upd_submit_{mail_id}", type="primary"):
+                                if st.button("同步更新进度并接管本邮件", use_container_width=True, key=f"upd_submit_{mail_id}", type="primary"):
                                     current_db[sel_idx]["阶段"] = new_status
                                     current_db[sel_idx]["面试时间"] = new_time
                                     if not sel_r.get("导师邮箱") and val_email:
@@ -2282,19 +3033,24 @@ def main():
                                             current_db[sel_idx]["关联邮件ID"] = mail_id
                                             
                                     save_db(current_db)
-                                    st.success(f"✅ 成功! 已将本邮件同步关联至 {sel_r['导师/教授']}。")
+                                    st.success(f"成功! 已将本邮件同步关联至 {sel_r['导师/教授']}。")
                                     st.rerun()
 
     elif menu == t("menu_db"):
         st.title(ui("导师库管理", "Professor DB"))
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 2rem;'>{ui('此处聚合所有套瓷与申请的导师信息。', 'This page aggregates all professor records and outreach status.')}</p>", unsafe_allow_html=True)
-        
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>{ui('此处聚合所有导师：既有已套瓷的，也可以是还没套瓷、仅作为目标登记的。', 'All professors live here — both contacted ones and not-yet-contacted targets.')}</p>", unsafe_allow_html=True)
+
+        top_l, top_r = st.columns([3, 1])
+        with top_r:
+            if st.button(ui("＋ 新建导师", "＋ Add professor"), type="primary", use_container_width=True, key="db_open_add"):
+                add_professor_dialog()
+
         current_db = load_db()
         if not current_db:
-            st.info(ui("尚无导师数据，请前往【智能邮箱】中创建。", "No professor data yet. Create records from Email Center."))
+            st.info(ui("尚无导师数据，点击右上角『新建导师』添加，或在『邮件记录』中创建。", "No professor data yet. Use 'Add professor' at the top right, or create via Email Records."))
         else:
             df = pd.DataFrame(current_db)
-            
+
             # Ensure sorting/formatting of missing fields
             if "创建时间" not in df.columns:
                 df["创建时间"] = df.get("更新时间", "未知")
@@ -2304,24 +3060,23 @@ def main():
                 df["学校名称"] = "未知"
             if "院系" not in df.columns:
                 df["院系"] = "未知"
-                
+
             df.fillna("-", inplace=True)
-            df.fillna("-", inplace=True)
-            
+
             # Create Filters
-            col_f1, col_f2 = st.columns(2)
+            col_f1, col_f2, _col_f3 = st.columns([1, 1, 2])
             countries = [ui("所有", "All")] + sorted(list(df["国家/地区"].unique()))
-            selected_country = col_f1.selectbox(ui("🌐 筛选国家", "🌐 Filter Country"), countries)
-            
+            selected_country = col_f1.selectbox(ui("筛选国家", "Filter Country"), countries)
+
             # Filter univs based on country
             if selected_country != ui("所有", "All"):
                 univs_in_country = df[df["国家/地区"] == selected_country]["学校名称"].unique()
             else:
                 univs_in_country = df["学校名称"].unique()
-                
+
             univs = [ui("所有", "All")] + sorted(list(univs_in_country))
-            selected_univ = col_f2.selectbox(ui("🏛️ 筛选学校", "🏛️ Filter University"), univs)
-            
+            selected_univ = col_f2.selectbox(ui("筛选学校", "Filter University"), univs)
+
             # Apply Filters
             filtered_df = df
             if selected_country != ui("所有", "All"):
@@ -2330,29 +3085,33 @@ def main():
                 filtered_df = filtered_df[filtered_df["学校名称"] == selected_univ]
 
             st.markdown(f"#### {ui('导师列表', 'Professor List')}")
-            h1, h2, h3, h4, h5, h6, h7, h8 = st.columns([1.6, 1.3, 1.3, 1.2, 1.2, 1.2, 1.4, 0.5])
-            h1.markdown(f"**{ui('导师/教授', 'Professor')}**")
-            h2.markdown(f"**{ui('学校', 'University')}**")
-            h3.markdown(f"**{ui('院系', 'Department')}**")
-            h4.markdown(f"**{ui('国家/地区', 'Country/Region')}**")
-            h5.markdown(f"**{ui('阶段', 'Stage')}**")
-            h6.markdown(f"**{ui('更新时间', 'Updated')}**")
-            h7.markdown(f"**{ui('当地时间', 'Local Time')}**")
-            h8.markdown(f"**{ui('操作', 'Action')}**")
-            for ridx, row in filtered_df.reset_index().iterrows():
-                real_idx = int(row["index"])
-                local_time = format_local_time(row.get("国家/地区", ""))
-
-                c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.6, 1.3, 1.3, 1.2, 1.2, 1.2, 1.4, 0.5])
-                c1.write(str(row.get("导师/教授", "-")))
-                c2.write(str(row.get("学校名称", "-")))
-                c3.write(str(row.get("院系", "-")))
-                c4.write(str(row.get("国家/地区", "-")))
-                c5.write(str(row.get("阶段", "-")))
-                c6.write(str(row.get("更新时间", "-")))
-                c7.write(local_time)
-                if c8.button("🗑️", key=f"db_del_btn_{real_idx}", help=ui("删除此导师记录", "Delete this record")):
-                    st.session_state["db_delete_idx"] = real_idx
+            rows = list(filtered_df.reset_index().iterrows())
+            per_row = 3
+            for i in range(0, len(rows), per_row):
+                cols = st.columns(per_row)
+                for j in range(per_row):
+                    if i + j >= len(rows):
+                        break
+                    _, row = rows[i + j]
+                    real_idx = int(row["index"])
+                    local_time = format_local_time(row.get("国家/地区", "")).replace("未知", ui("未知", "Unknown"))
+                    prof = str(row.get("导师/教授", "-"))
+                    homepage = str(row.get("主页链接", "") or "")
+                    with cols[j]:
+                        with st.container(border=True):
+                            if homepage.strip():
+                                st.markdown(f"#### <a href='{homepage}' target='_blank' style='text-decoration:none;color:inherit;'>{prof}</a>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"#### {prof}")
+                            st.markdown(f"<span class='tag'>{row.get('阶段', '-')}</span>", unsafe_allow_html=True)
+                            st.markdown(f"**{row.get('学校名称', '-')}**")
+                            dept = str(row.get("院系", "") or "").strip()
+                            st.caption(f"{row.get('国家/地区', '-')}" + (f" · {dept}" if dept and dept != "-" else ""))
+                            st.caption(ui("研究方向：", "Research: ") + str(row.get("研究方向", "-")))
+                            st.caption(ui("当地时间：", "Local time: ") + local_time)
+                            st.caption(ui("更新：", "Updated: ") + str(row.get("更新时间", "-")))
+                            if st.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
+                                st.session_state["db_delete_idx"] = real_idx
 
             if "db_delete_idx" in st.session_state:
                 idx_to_del = st.session_state["db_delete_idx"]
@@ -2365,6 +3124,7 @@ def main():
                         st.session_state.pop("db_delete_idx", None)
                         st.rerun()
                     if d2.button(ui("确认删除", "Confirm Delete"), key="db_del_confirm", use_container_width=True, type="primary"):
+                        purge_lite_emails_for_record(current_db[idx_to_del])
                         current_db.pop(idx_to_del)
                         save_db(current_db)
                         st.session_state.pop("db_delete_idx", None)
@@ -2373,7 +3133,7 @@ def main():
 
     elif menu == t("menu_interview"):
         st.title(ui("面试准备舱", "Interview Prep"))
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 1rem;'>{ui('可对任意导师提前准备面试；已预约面试会显示具体时间。', 'Prepare for interviews with any professor; scheduled interviews show exact time.')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>{ui('可对任意导师提前准备面试；已预约面试会显示具体时间。', 'Prepare for interviews with any professor; scheduled interviews show exact time.')}</p>", unsafe_allow_html=True)
 
         current_db = load_db()
         scheduled_count = len([r for r in current_db if r.get("阶段") == "面试预约阶段"])
@@ -2399,9 +3159,9 @@ def main():
                 status_show = row.get("阶段", "未联系")
                 intv = row.get("面试时间", "")
                 if status_show == "面试预约阶段" and intv:
-                    title = f"🎯 {row.get('导师/教授', '未知导师')} | {row.get('学校名称', '未知学校')} | 状态: {status_show} | 面试: {intv}"
+                    title = f"{row.get('导师/教授', '未知导师')} | {row.get('学校名称', '未知学校')} | 状态: {status_show} | 面试: {intv}"
                 else:
-                    title = f"🎯 {row.get('导师/教授', '未知导师')} | {row.get('学校名称', '未知学校')} | 状态: {status_show}"
+                    title = f"{row.get('导师/教授', '未知导师')} | {row.get('学校名称', '未知学校')} | 状态: {status_show}"
                 with st.expander(title, expanded=False):
                     st.write(f"**院系**: {row.get('院系', '未知')}")
                     st.write(f"**研究方向**: {row.get('研究方向', '未明确')}")
@@ -2424,7 +3184,7 @@ def main():
 
                     cached_questions = row.get("面试问题", [])
                     if isinstance(cached_questions, list) and cached_questions:
-                        with st.expander(ui("🧠 AI 面试问题（基于最近论文）", "🧠 AI Interview Questions (from recent papers)"), expanded=False):
+                        with st.expander(ui("AI 面试问题（基于最近论文）", "AI Interview Questions (from recent papers)"), expanded=False):
                             st.caption(ui(f"问题更新时间: {row.get('面试问题更新时间', '未知')}",
                                           f"Questions updated: {row.get('面试问题更新时间', 'Unknown')}"))
                             for qi, q in enumerate(cached_questions, start=1):
@@ -2483,7 +3243,7 @@ def main():
 
                     high_freq_points = row.get("高频考察点", [])
                     if isinstance(high_freq_points, list) and high_freq_points:
-                        with st.expander(ui("🔥 高频考察点", "🔥 High-Frequency Questions"), expanded=False):
+                        with st.expander(ui("高频考察点", "High-Frequency Questions"), expanded=False):
                             for pi, item in enumerate(high_freq_points, start=1):
                                 q_text = ""
                                 a_text = ""
@@ -2512,7 +3272,7 @@ def main():
 
                     cached_advice = row.get("面试建议", [])
                     if isinstance(cached_advice, list) and cached_advice:
-                        with st.expander(ui("🧭 面试建议（简历 + 导师主页 + Scholar）", "🧭 Interview Advice (Resume + Homepage + Scholar)"), expanded=False):
+                        with st.expander(ui("面试建议（简历 + 导师主页 + Scholar）", "Interview Advice (Resume + Homepage + Scholar)"), expanded=False):
                             st.caption(ui(f"建议更新时间: {row.get('面试建议更新时间', '未知')}",
                                           f"Advice updated: {row.get('面试建议更新时间', 'Unknown')}"))
                             for ai, adv in enumerate(cached_advice, start=1):
@@ -2520,11 +3280,11 @@ def main():
 
                     b1, b2 = st.columns(2)
                     with b1:
-                        if st.button(ui("🎭 模拟面试", "🎭 Mock Interview"), key=f"open_mock_interview_{idx}", use_container_width=True):
+                        if st.button(ui("模拟面试", "Mock Interview"), key=f"open_mock_interview_{idx}", use_container_width=True):
                             show_mock_interview_dialog(idx, row)
 
                     with b2:
-                        gen_q = st.button(ui("✨ 生成5个高频面试问题", "✨ Generate 5 High-Frequency Questions"), key=f"gen_questions_{idx}", use_container_width=True)
+                        gen_q = st.button(ui("生成5个高频面试问题", "Generate 5 High-Frequency Questions"), key=f"gen_questions_{idx}", use_container_width=True)
                     if gen_q:
                         with st.spinner(ui("AI 正在生成高频综合面试问题...", "AI is generating high-frequency interview questions...")):
                             cfg = load_config()
@@ -2540,12 +3300,12 @@ def main():
                             current_db[idx]["面试问题"] = questions
                             current_db[idx]["面试问题更新时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             save_db(current_db)
-                            st.success(ui(f"✅ 已生成 {len(questions)} 条高频问题", f"✅ Generated {len(questions)} high-frequency questions"))
+                            st.success(ui(f"已生成 {len(questions)} 条高频问题", f"Generated {len(questions)} high-frequency questions"))
                             st.rerun()
                         else:
                             st.error(ui(f"生成失败：{raw}", f"Generation failed: {raw}"))
 
-                    if st.button(ui("🧭 生成面试建议（结合简历+导师）", "🧭 Generate Interview Advice (Resume + Professor)"), key=f"gen_advice_{idx}", use_container_width=True):
+                    if st.button(ui("生成面试建议（结合简历+导师）", "Generate Interview Advice (Resume + Professor)"), key=f"gen_advice_{idx}", use_container_width=True):
                         cfg = load_config()
                         ai_cfg = _ai_cfg_with_app_lang(cfg)
                         resume_text = get_active_resume_text(cfg)
@@ -2568,7 +3328,7 @@ def main():
                                 current_db[idx]["面试建议"] = advice
                                 current_db[idx]["面试建议更新时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 save_db(current_db)
-                                st.success(ui(f"✅ 已生成 {len(advice)} 条面试建议", f"✅ Generated {len(advice)} interview advice items"))
+                                st.success(ui(f"已生成 {len(advice)} 条面试建议", f"Generated {len(advice)} interview advice items"))
                                 st.rerun()
                             else:
                                 st.error(ui(f"生成失败：{raw}", f"Generation failed: {raw}"))
@@ -2591,27 +3351,27 @@ def main():
 
     elif menu == settings_menu_label:
         st.title(settings_menu_label)
-        st.markdown(f"<p style='color: #9aa9ca; margin-bottom: 2rem;'>{ui('配置你的邮箱与系统连接参数，数据仅保存在本地文件中。', 'Configure email and system connection settings. Data is stored locally only.')}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 2rem;'>{ui('配置你的邮箱与系统连接参数，数据仅保存在本地文件中。', 'Configure email and system connection settings. Data is stored locally only.')}</p>", unsafe_allow_html=True)
         
         config = load_config()
         
-        st.subheader(ui("📧 邮箱账号绑定", "📧 Email Account Binding"))
+        st.subheader(ui("邮箱账号绑定", "Email Account Binding"))
         st.info(ui("""**常用邮箱配置指南：**
 - **Gmail**: IMAP 为 `imap.gmail.com`，SMTP 为 `smtp.gmail.com`。(密码须用 [应用专用密码](https://myaccount.google.com/apppasswords))
 - **个人版 Outlook/Hotmail**: IMAP 为 `outlook.office365.com`。(需生成 [个人应用密码](https://account.live.com/proofs/manage/additional))
 - **大学/机构邮箱 (如 connect.polyu.hk)**: 
   - IMAP: `outlook.office365.com`
   - SMTP: `smtp.office365.com`
-  - 🔑 **密码获取**: 这是组织账户，请务必前往专属安全页：[https://mysignins.microsoft.com/security-info](https://mysignins.microsoft.com/security-info) 登录并添加“应用密码(App Password)”。
-  - ⚠️ **如果连接一直被拒绝**: 学校可能禁用了IMAP基础认证。建议在网页版Outlook中设置【自动转发】到你个人的Gmail邮箱，然后在本系统绑定该Gmail，不仅稳定而且不用去学校后台折腾安全策略！
+  - **密码获取**: 这是组织账户，请务必前往专属安全页：[https://mysignins.microsoft.com/security-info](https://mysignins.microsoft.com/security-info) 登录并添加“应用密码(App Password)”。
+  - **如果连接一直被拒绝**: 学校可能禁用了IMAP基础认证。建议在网页版Outlook中设置【自动转发】到你个人的Gmail邮箱，然后在本系统绑定该Gmail，不仅稳定而且不用去学校后台折腾安全策略！
 """, """**Common Email Setup Guide:**
 - **Gmail**: IMAP `imap.gmail.com`, SMTP `smtp.gmail.com` (use [App Password](https://myaccount.google.com/apppasswords)).
 - **Personal Outlook/Hotmail**: IMAP `outlook.office365.com` (set [App Password](https://account.live.com/proofs/manage/additional)).
 - **University/Organization mailbox (e.g., connect.polyu.hk)**:
   - IMAP: `outlook.office365.com`
   - SMTP: `smtp.office365.com`
-  - 🔑 **Password setup**: For org accounts, visit [https://mysignins.microsoft.com/security-info](https://mysignins.microsoft.com/security-info) and add an App Password.
-  - ⚠️ **If IMAP is rejected**: Your institution may disable basic auth. A practical fallback is auto-forwarding to Gmail and binding Gmail here.
+  - **Password setup**: For org accounts, visit [https://mysignins.microsoft.com/security-info](https://mysignins.microsoft.com/security-info) and add an App Password.
+  - **If IMAP is rejected**: Your institution may disable basic auth. A practical fallback is auto-forwarding to Gmail and binding Gmail here.
 """))
         
         with st.form("email_config_form"):
@@ -2622,7 +3382,7 @@ def main():
             with col2:
                 password = st.text_input(ui("应用密码 (App Password)", "App Password"), value=config.get("password", ""), type="password")
                 smtp_server = st.text_input(ui("SMTP 服务器 (发件)", "SMTP Server (Outbox)"), value=config.get("smtp_server", "smtp.gmail.com"))
-            submit_btn = st.form_submit_button(ui("💾 保存邮箱配置", "💾 Save Email Config"))
+            submit_btn = st.form_submit_button(ui("保存邮箱配置", "Save Email Config"))
             
         if submit_btn:
             if email and password:
@@ -2631,9 +3391,9 @@ def main():
                 config["imap_server"] = imap_server
                 config["smtp_server"] = smtp_server
             save_config(config)
-            st.success(ui("✅ 邮箱及网络配置已成功保存！配置将持久化保留在本地。", "✅ Email and network settings saved locally."))
+            st.success(ui("邮箱及网络配置已成功保存！配置将持久化保留在本地。", "Email and network settings saved locally."))
 
-        st.subheader(ui("🤖 AI 模型配置", "🤖 AI Model Config"))
+        st.subheader(ui("AI 模型配置", "AI Model Config"))
         ai_provider = st.selectbox(
             ui("选择 AI 分析引擎", "Select AI Engine"),
             ["通义千问 (Qwen)", "Google Gemini"],
@@ -2660,14 +3420,14 @@ def main():
                 on_change=_save_ai_settings_from_state,
             )
 
-        # === 💎 AI API 连通性测试模块 ===
+        # === AI API 连通性测试模块 ===
         provider = ai_provider
-        st.markdown(f"### {ui('🧪', '🧪')} {provider} {ui('连通性测试', 'Connectivity Test')}")
+        st.markdown(f"### {ui('', '')} {provider} {ui('连通性测试', 'Connectivity Test')}")
         
         test_api_key = qwen_api_key_stored if provider == "通义千问 (Qwen)" else gemini_api_key_stored
         
         if test_api_key:
-            if st.button(ui(f"🚀 测试 {provider} 接口", f"🚀 Test {provider} API"), type="secondary"):
+            if st.button(ui(f"测试 {provider} 接口", f"Test {provider} API"), type="secondary"):
                 with st.spinner(ui("正在连接 AI 服务器进行测试...", "Connecting to AI server for testing...")):
                     try:
                         if provider == "通义千问 (Qwen)":
@@ -2680,7 +3440,7 @@ def main():
                                 messages=[{'role': 'user', 'content': "Please strictly reply: 'API is working!' in English without any other words."}]
                             )
                             resp_text = completion.choices[0].message.content
-                            st.success(ui(f"🎉 **测试通过！** 模型回复内容: `{resp_text.strip()}`", f"🎉 **Test passed!** Response: `{resp_text.strip()}`"))
+                            st.success(ui(f"**测试通过！** 模型回复内容: `{resp_text.strip()}`", f"**Test passed!** Response: `{resp_text.strip()}`"))
                             
                         else: # Gemini
                             genai.configure(api_key=test_api_key)
@@ -2691,31 +3451,31 @@ def main():
                             resp_text = (getattr(resp, "text", "") or "").strip()
                             st.success(
                                 ui(
-                                    f"🎉 **测试通过！** 模型 `{used_model}` 回复内容: `{resp_text}`",
-                                    f"🎉 **Test passed!** Model `{used_model}` response: `{resp_text}`",
+                                    f"**测试通过！** 模型 `{used_model}` 回复内容: `{resp_text}`",
+                                    f"**Test passed!** Model `{used_model}` response: `{resp_text}`",
                                 )
                             )
                     
                     except Exception as e:
-                        st.error(ui("❌ 连通失败！", "❌ Connectivity test failed: ") + str(e))
+                        st.error(ui("连通失败！", "Connectivity test failed: ") + str(e))
         else:
             st.info(ui(f"请先在上方填入 {provider} API Key。", f"Please enter your {provider} API key above first."))
         # ==================================
                 
         # 始终为已配置的邮箱显示最新 5 封邮件
         if config.get("email") and config.get("password"):
-            st.subheader(ui("📡 连接状态与最新邮件", "📡 Connection Status & Latest Emails"))
-            with st.spinner(ui("🔄 正在挂载 IMAP 协议并拉取近期邮件...", "🔄 Mounting IMAP and fetching recent emails...")):
+            st.subheader(ui("连接状态与最新邮件", "Connection Status & Latest Emails"))
+            with st.spinner(ui("正在挂载 IMAP 协议并拉取近期邮件...", "Mounting IMAP and fetching recent emails...")):
                 success, result = test_imap_connection(config["email"], config["password"], config["imap_server"])
                 if success:
-                    st.success(ui("🎉 连接成功！您的网络与邮箱均状态良好。", "🎉 Connection successful. Network and mailbox are healthy."))
-                    st.markdown(f"#### {ui('📫 最近收到的 5 封邮件：', '📫 Latest 5 Emails:')}")
+                    st.success(ui("连接成功！您的网络与邮箱均状态良好。", "Connection successful. Network and mailbox are healthy."))
+                    st.markdown(f"#### {ui('最近收到的 5 封邮件：', 'Latest 5 Emails:')}")
                     st.dataframe(pd.DataFrame(result), use_container_width=True)
                 else:
-                    st.error(ui(f"❌ 连接被拒绝。这通常是因为密码错误、未开启 IMAP，或被安全组拦截。\\n\\n**错误详情：** `{result}`",
-                                  f"❌ Connection rejected. Usually caused by wrong password, IMAP disabled, or security policy.\\n\\n**Error:** `{result}`"))
-                    st.info(ui("💡 **自救指南：**\\n1. **Gmail 用户**: 必须使用 [App Password](https://myaccount.google.com/apppasswords) 代替登录密码。\\n2. **Outlook 用户**: 确保在设置中开启了 POP/IMAP 选项。\\n3. 检查 IMAP 服务器地址是否正确。",
-                               "💡 **Troubleshooting:**\\n1. **Gmail**: Use [App Password](https://myaccount.google.com/apppasswords) instead of account password.\\n2. **Outlook**: Ensure POP/IMAP is enabled.\\n3. Verify IMAP server address is correct."))
+                    st.error(ui(f"连接被拒绝。这通常是因为密码错误、未开启 IMAP，或被安全组拦截。\\n\\n**错误详情：** `{result}`",
+                                  f"Connection rejected. Usually caused by wrong password, IMAP disabled, or security policy.\\n\\n**Error:** `{result}`"))
+                    st.info(ui("**自救指南：**\\n1. **Gmail 用户**: 必须使用 [App Password](https://myaccount.google.com/apppasswords) 代替登录密码。\\n2. **Outlook 用户**: 确保在设置中开启了 POP/IMAP 选项。\\n3. 检查 IMAP 服务器地址是否正确。",
+                               "**Troubleshooting:**\\n1. **Gmail**: Use [App Password](https://myaccount.google.com/apppasswords) instead of account password.\\n2. **Outlook**: Ensure POP/IMAP is enabled.\\n3. Verify IMAP server address is correct."))
 
     else:
         st.title(menu)

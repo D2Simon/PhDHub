@@ -17,6 +17,7 @@ def _data_path(name):
 CONFIG_FILE = _data_path("phdhub_config.json")
 DB_FILE = _data_path("phdhub_db.json")
 EMAILS_CACHE_FILE = _data_path("phdhub_emails_cache.json")
+LITE_EMAILS_FILE = _data_path("phdhub_lite_emails.json")
 
 DEFAULT_CONFIG = {
     "email": "",

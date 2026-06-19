@@ -10,6 +10,7 @@ secrets.*
 # 数据库和缓存文件
 phdhub_db.json
 phdhub_emails_cache.json
+phdhub_lite_emails.json
 phdhub_resumes.json
 phdhub_rps.json
 resumes/

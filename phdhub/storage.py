@@ -4,7 +4,7 @@ import json
 import os
 from copy import deepcopy
 
-from .constants import CONFIG_FILE, DB_FILE, DEFAULT_CONFIG
+from .constants import CONFIG_FILE, DB_FILE, DEFAULT_CONFIG, LITE_EMAILS_FILE
 
 
 def _read_json(path, default):
@@ -33,3 +33,12 @@ def load_db():
 
 def save_db(data):
     _write_json(DB_FILE, data, indent=4, ensure_ascii=False)
+
+
+def load_lite_emails():
+    """Manually entered email records used by Lite mode."""
+    return _read_json(LITE_EMAILS_FILE, [])
+
+
+def save_lite_emails(data):
+    _write_json(LITE_EMAILS_FILE, data, indent=4, ensure_ascii=False)
