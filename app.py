@@ -1981,9 +1981,11 @@ def main():
             
     elif menu == data_mgmt_label:
         st.title(ui("资料管理", "Data Management"))
+        _imp_toast = st.session_state.pop("data_import_toast", None)
+        if _imp_toast:
+            st.toast(_imp_toast, icon="✅")
         if st.session_state.pop("data_cleared_flag", False):
-            st.success(ui("✓ 已成功清空所有资料（导师库与邮件记录均已删除）。",
-                          "✓ All data cleared successfully (Professor DB and email records removed)."))
+            st.toast(ui("已清空所有资料", "All data cleared"), icon="🗑️")
         st.markdown(
             f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>"
             f"{ui('备份、导入或清空你的全部本地数据（导师库 + 邮件记录）。', 'Back up, import, or clear all your local data (Professor DB + email records).')}</p>",
@@ -2007,23 +2009,33 @@ def main():
             key="data_backup_btn",
         )
 
-        st.caption(ui("或：另存为到本机指定路径（自定义保存位置）。", "Or: save directly to a custom path on this machine."))
-        default_save_path = os.path.join(os.path.expanduser("~"), f"phdhub_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-        sp1, sp2 = st.columns([3, 1])
-        with sp1:
-            save_path = st.text_input(ui("保存路径", "Save path"), value=default_save_path, key="data_save_path", label_visibility="collapsed")
-        with sp2:
-            if st.button(ui("另存为", "Save as"), key="data_saveas_btn", use_container_width=True):
-                try:
-                    target = os.path.expanduser(save_path.strip())
-                    parent = os.path.dirname(target)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
+        st.caption(ui("或：点「另存为」弹出系统保存窗口，自行选择保存位置。", "Or: click 'Save as' to open a native dialog and pick the location."))
+        if st.button(ui("另存为…", "Save as…"), key="data_saveas_btn"):
+            import subprocess
+            import sys
+            initial_name = f"phdhub_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            picker_code = (
+                "import tkinter as tk\n"
+                "from tkinter import filedialog\n"
+                "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+                "p = filedialog.asksaveasfilename(title='Save backup as', defaultextension='.json',"
+                f" initialfile={initial_name!r}, filetypes=[('JSON','*.json'),('All files','*.*')])\n"
+                "r.destroy()\n"
+                "import sys; sys.stdout.write(p or '')\n"
+            )
+            try:
+                with st.spinner(ui("已弹出保存窗口，请在系统对话框中选择位置…", "A save dialog has opened — pick a location…")):
+                    res = subprocess.run([sys.executable, "-c", picker_code], capture_output=True, text=True, timeout=180)
+                target = (res.stdout or "").strip()
+                if target:
                     with open(target, "w", encoding="utf-8") as _bf:
                         _bf.write(backup_payload)
-                    st.success(ui(f"已保存到：{target}", f"Saved to: {target}"))
-                except Exception as e:
-                    st.error(ui(f"保存失败：{e}", f"Save failed: {e}"))
+                    st.toast(ui(f"已保存到：{target}", f"Saved to: {target}"), icon="✅")
+                else:
+                    st.toast(ui("已取消保存", "Save canceled"))
+            except Exception as e:
+                st.error(ui(f"无法打开保存窗口（请改用上方下载按钮）：{e}",
+                            f"Cannot open save dialog (use the download button above): {e}"))
 
         st.divider()
         st.subheader(ui("导入资料", "Import"))
@@ -2046,7 +2058,7 @@ def main():
                     seen_ids = {str(m.get("id")) for m in cur_mails}
                     cur_mails.extend(m for m in imp_mails if str(m.get("id")) not in seen_ids)
                     save_lite_emails(cur_mails)
-                st.success(ui("导入成功！", "Imported successfully!"))
+                st.session_state["data_import_toast"] = ui("导入成功！", "Imported successfully!")
                 st.rerun()
             except Exception as e:
                 st.error(ui(f"导入失败：{e}", f"Import failed: {e}"))
