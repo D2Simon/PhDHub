@@ -1397,14 +1397,20 @@ def main():
         else:
             page_ids = ["resume", "rp", "dashboard", "email", "db", "interview", "settings"]
 
+        # 清理早期版本可能残留的旧导航 key（其值可能是标签而非页面 id）
+        for _stale in ("nav_radio_lite", "nav_radio_full"):
+            st.session_state.pop(_stale, None)
+
         cur_id = st.session_state.get("nav_page_id", page_ids[0])
         if cur_id not in page_ids:
             cur_id = page_ids[0]
+        # 不传 key：用稳定的页面 id 作选项 + index 控制选中，切换语言不会重置当前页
         menu_id = st.radio(
             t("nav_menu"), page_ids, index=page_ids.index(cur_id),
             format_func=lambda pid: label_map.get(pid, pid),
-            key=f"nav_radio_{'lite' if lite_mode else 'full'}",
         )
+        if menu_id not in label_map:
+            menu_id = cur_id
         st.session_state["nav_page_id"] = menu_id
         menu = label_map[menu_id]
 
