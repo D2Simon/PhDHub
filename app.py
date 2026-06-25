@@ -213,30 +213,67 @@ def edit_professor_dialog(real_idx):
     prio_opts = ["T0", "T1", "T2"]
     k = f"edit_{real_idx}"
 
+    cur_country = str(rec.get("国家/地区", "") or "").strip()
+    cur_univ = str(rec.get("学校名称", "") or "").strip()
+
+    # 大洲默认值：反查包含当前国家的大洲，未匹配则落到「其他」
+    conts = list(CONTINENTS.keys())
+    def_cont_idx = next((i for i, c in enumerate(conts) if cur_country in CONTINENTS.get(c, [])),
+                        conts.index("其他 / Other") if "其他 / Other" in conts else 0)
+
     c1, c2 = st.columns(2)
     with c1:
         name = st.text_input(_ui_local("导师姓名（必填）", "Professor name (required)"),
                              value=str(rec.get("导师/教授", "")), key=f"{k}_name")
-        univ = st.text_input(_ui_local("学校名称（必填）", "University (required)"),
-                             value=str(rec.get("学校名称", "")), key=f"{k}_univ")
-        country = st.text_input(_ui_local("国家 / 地区", "Country / Region"),
-                                value=str(rec.get("国家/地区", "")), key=f"{k}_country")
+        # 大洲 -> 国家 级联（与邮件登记表一致）
+        cont = st.selectbox(_ui_local("所在大洲", "Continent"), conts, index=def_cont_idx, key=f"{k}_cont")
+        countries = CONTINENTS.get(cont, [])
+        if countries:
+            c_idx = countries.index(cur_country) if cur_country in countries else 0
+            country = st.selectbox(_ui_local("国家 / 地区", "Country / Region"), countries, index=c_idx,
+                                   format_func=lambda c: COUNTRY_LABELS.get(c, c), key=f"{k}_countrysel")
+        else:
+            country = st.text_input(_ui_local("国家 / 地区（手动输入）", "Country / Region (manual)"),
+                                    value=cur_country, key=f"{k}_countryman").strip()
         dept = st.text_input(_ui_local("院系 / 专业", "Department"),
                              value=str(rec.get("院系", "")), key=f"{k}_dept")
     with c2:
+        # 学校：依据所选国家给出预选项；命中则预选，否则切到手动并回填原值
+        univ_candidates = []
+        if country:
+            world_univ = get_world_universities()
+            for wk, wv in world_univ.items():
+                kname = wk.split(" ", 1)[1] if " " in wk else wk
+                if kname.strip().lower() == str(country).strip().lower():
+                    univ_candidates = list(wv)
+                    break
+        manual_label = _ui_local("其他（手动输入）", "Other (manual)")
+        if univ_candidates:
+            cleaned = [re.sub(r"\s*\(QS.*?\)\s*$", "", x).strip() for x in univ_candidates]
+            opts = univ_candidates + [manual_label]
+            u_idx = cleaned.index(cur_univ) if cur_univ in cleaned else len(opts) - 1
+            choice = st.selectbox(_ui_local("学校（必填）", "University (required)"), opts, index=u_idx, key=f"{k}_univsel")
+            if choice == manual_label:
+                univ = st.text_input(_ui_local("学校名称", "University name"), value=cur_univ, key=f"{k}_univman").strip()
+            else:
+                univ = re.sub(r"\s*\(QS.*?\)\s*$", "", choice).strip()
+        else:
+            univ = st.text_input(_ui_local("学校（必填）", "University (required)"),
+                                 value=cur_univ, key=f"{k}_univman").strip()
         direction = st.text_input(_ui_local("研究方向", "Research direction"),
                                   value=str(rec.get("研究方向", "")), key=f"{k}_dir")
         email = st.text_input(_ui_local("导师邮箱（选填）", "Professor email (optional)"),
                               value=str(rec.get("导师邮箱", "")), key=f"{k}_email")
         home = st.text_input(_ui_local("主页链接（选填）", "Homepage (optional)"),
                              value=str(rec.get("主页链接", "")), key=f"{k}_home")
-        prio_cur = str(rec.get("推荐级", "T1"))
-        prio = st.selectbox(_ui_local("意向级别", "Priority"), prio_opts,
-                            index=prio_opts.index(prio_cur) if prio_cur in prio_opts else 1, key=f"{k}_prio")
 
+    pcol, scol = st.columns(2)
+    prio_cur = str(rec.get("推荐级", "T1"))
+    prio = pcol.selectbox(_ui_local("意向级别", "Priority"), prio_opts,
+                          index=prio_opts.index(prio_cur) if prio_cur in prio_opts else 1, key=f"{k}_prio")
     stage_cur = str(rec.get("阶段", "未联系"))
-    stage = st.selectbox(_ui_local("当前阶段", "Stage"), stage_opts,
-                         index=stage_opts.index(stage_cur) if stage_cur in stage_opts else 0, key=f"{k}_stage")
+    stage = scol.selectbox(_ui_local("当前阶段", "Stage"), stage_opts,
+                           index=stage_opts.index(stage_cur) if stage_cur in stage_opts else 0, key=f"{k}_stage")
     note = st.text_area(_ui_local("备注（选填）", "Note (optional)"),
                         value=clean_note(rec.get("备注", "")), key=f"{k}_note",
                         placeholder=_ui_local("例如：横向项目很多 / 回复很快", "e.g. lots of industry projects"))
@@ -3243,6 +3280,8 @@ def main():
 
                             edit_col, del_col = st.columns(2)
                             if edit_col.button(ui("✏️ 编辑", "✏️ Edit"), key=f"db_edit_btn_{real_idx}", use_container_width=True):
+                                for _sk in [kk for kk in st.session_state if str(kk).startswith(f"edit_{real_idx}_")]:
+                                    st.session_state.pop(_sk, None)
                                 edit_professor_dialog(real_idx)
                             if del_col.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
                                 st.session_state["db_delete_idx"] = real_idx
