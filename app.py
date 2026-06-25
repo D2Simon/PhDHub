@@ -3222,7 +3222,7 @@ def main():
             df.fillna("-", inplace=True)
 
             # Create Filters
-            col_f1, col_f2, _col_f3 = st.columns([1, 1, 2])
+            col_f1, col_f2, col_f3, _col_f4 = st.columns([1, 1, 1, 1])
             countries = [ui("所有", "All")] + sorted(list(df["国家/地区"].unique()))
             selected_country = col_f1.selectbox(ui("筛选国家", "Filter Country"), countries)
 
@@ -3235,12 +3235,22 @@ def main():
             univs = [ui("所有", "All")] + sorted(list(univs_in_country))
             selected_univ = col_f2.selectbox(ui("筛选学校", "Filter University"), univs)
 
+            # Contact status filter: 阶段 == "未联系" 视为未联系，其余视为已联系
+            status_all = ui("所有", "All")
+            status_contacted = ui("已联系", "Contacted")
+            status_uncontacted = ui("未联系", "Not contacted")
+            selected_status = col_f3.selectbox(ui("联系状态", "Contact status"),
+                                               [status_all, status_contacted, status_uncontacted])
+
             # Apply Filters
             filtered_df = df
             if selected_country != ui("所有", "All"):
                 filtered_df = filtered_df[filtered_df["国家/地区"] == selected_country]
             if selected_univ != ui("所有", "All"):
                 filtered_df = filtered_df[filtered_df["学校名称"] == selected_univ]
+            if selected_status != status_all and "阶段" in filtered_df.columns:
+                is_uncontacted = filtered_df["阶段"].astype(str) == "未联系"
+                filtered_df = filtered_df[~is_uncontacted if selected_status == status_contacted else is_uncontacted]
 
             st.markdown(f"#### {ui('导师列表', 'Professor List')}")
             rows = list(filtered_df.reset_index().iterrows())
