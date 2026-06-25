@@ -201,6 +201,73 @@ def add_professor_dialog():
             st.rerun()
 
 
+@st.dialog("编辑导师 / Edit Professor")
+def edit_professor_dialog(real_idx):
+    """浮窗：编辑导师库中某条导师的全部资料。"""
+    db = load_db()
+    if not (0 <= real_idx < len(db)):
+        st.error(_ui_local("记录不存在，请刷新后重试。", "Record not found, please refresh."))
+        return
+    rec = db[real_idx]
+    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+    prio_opts = ["T0", "T1", "T2"]
+    k = f"edit_{real_idx}"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        name = st.text_input(_ui_local("导师姓名（必填）", "Professor name (required)"),
+                             value=str(rec.get("导师/教授", "")), key=f"{k}_name")
+        univ = st.text_input(_ui_local("学校名称（必填）", "University (required)"),
+                             value=str(rec.get("学校名称", "")), key=f"{k}_univ")
+        country = st.text_input(_ui_local("国家 / 地区", "Country / Region"),
+                                value=str(rec.get("国家/地区", "")), key=f"{k}_country")
+        dept = st.text_input(_ui_local("院系 / 专业", "Department"),
+                             value=str(rec.get("院系", "")), key=f"{k}_dept")
+    with c2:
+        direction = st.text_input(_ui_local("研究方向", "Research direction"),
+                                  value=str(rec.get("研究方向", "")), key=f"{k}_dir")
+        email = st.text_input(_ui_local("导师邮箱（选填）", "Professor email (optional)"),
+                              value=str(rec.get("导师邮箱", "")), key=f"{k}_email")
+        home = st.text_input(_ui_local("主页链接（选填）", "Homepage (optional)"),
+                             value=str(rec.get("主页链接", "")), key=f"{k}_home")
+        prio_cur = str(rec.get("推荐级", "T1"))
+        prio = st.selectbox(_ui_local("意向级别", "Priority"), prio_opts,
+                            index=prio_opts.index(prio_cur) if prio_cur in prio_opts else 1, key=f"{k}_prio")
+
+    stage_cur = str(rec.get("阶段", "未联系"))
+    stage = st.selectbox(_ui_local("当前阶段", "Stage"), stage_opts,
+                         index=stage_opts.index(stage_cur) if stage_cur in stage_opts else 0, key=f"{k}_stage")
+    note = st.text_area(_ui_local("备注（选填）", "Note (optional)"),
+                        value=clean_note(rec.get("备注", "")), key=f"{k}_note",
+                        placeholder=_ui_local("例如：横向项目很多 / 回复很快", "e.g. lots of industry projects"))
+
+    if st.button(_ui_local("保存修改", "Save changes"), type="primary", use_container_width=True, key=f"{k}_save"):
+        if not (name.strip() and univ.strip()):
+            st.error(_ui_local("请填写导师姓名和学校名称。", "Please fill in professor name and university."))
+            return
+        # 重新载入，避免覆盖期间发生的其他改动
+        cur = load_db()
+        if not (0 <= real_idx < len(cur)):
+            st.error(_ui_local("记录已变化，请刷新后重试。", "Record changed, please refresh."))
+            return
+        cur[real_idx].update({
+            "导师/教授": name.strip(),
+            "学校名称": univ.strip(),
+            "国家/地区": country.strip() or "未知",
+            "院系": dept.strip(),
+            "研究方向": direction.strip() or "未明确",
+            "导师邮箱": email.strip(),
+            "主页链接": home.strip(),
+            "推荐级": prio,
+            "阶段": stage,
+            "备注": note.strip(),
+            "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        save_db(cur)
+        st.session_state["db_edit_toast"] = _ui_local("已保存修改", "Changes saved")
+        st.rerun()
+
+
 def t(key):
     return translate(key, st.session_state.get("app_lang", "zh-CN"))
 
@@ -3089,6 +3156,9 @@ def main():
 
     elif menu == t("menu_db"):
         st.title(ui("导师库管理", "Professor DB"))
+        _edit_toast = st.session_state.pop("db_edit_toast", None)
+        if _edit_toast:
+            st.toast(_edit_toast, icon="✅")
         st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>{ui('此处聚合所有导师：既有已套瓷的，也可以是还没套瓷、仅作为目标登记的。', 'All professors live here — both contacted ones and not-yet-contacted targets.')}</p>", unsafe_allow_html=True)
 
         top_l, top_r = st.columns([3, 1])
@@ -3171,22 +3241,10 @@ def main():
                                     unsafe_allow_html=True,
                                 )
 
-                            with st.popover(ui("📝 备注", "📝 Note"), use_container_width=True):
-                                new_note = st.text_area(
-                                    ui("备注", "Note"),
-                                    value=note_val,
-                                    key=f"db_note_edit_{real_idx}",
-                                    placeholder=ui("例如：横向项目很多 / 回复很快", "e.g. lots of industry projects"),
-                                )
-                                if st.button(ui("保存备注", "Save note"), key=f"db_note_save_{real_idx}",
-                                             type="primary", use_container_width=True):
-                                    if 0 <= real_idx < len(current_db):
-                                        current_db[real_idx]["备注"] = new_note.strip()
-                                        save_db(current_db)
-                                        st.toast(ui("备注已保存", "Note saved"), icon="📝")
-                                        st.rerun()
-
-                            if st.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
+                            edit_col, del_col = st.columns(2)
+                            if edit_col.button(ui("✏️ 编辑", "✏️ Edit"), key=f"db_edit_btn_{real_idx}", use_container_width=True):
+                                edit_professor_dialog(real_idx)
+                            if del_col.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
                                 st.session_state["db_delete_idx"] = real_idx
 
             if "db_delete_idx" in st.session_state:
