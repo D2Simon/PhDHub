@@ -176,6 +176,9 @@ def add_professor_dialog():
     stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
     p = lite_prof_form("db_new", compact=True)
     stage = st.selectbox(_ui_local("当前阶段", "Stage"), stage_opts, index=0, key="db_new_stage")
+    note = st.text_area(_ui_local("备注（选填）", "Note (optional)"),
+                        key="db_new_note",
+                        placeholder=_ui_local("例如：横向项目很多 / 回复很快", "e.g. lots of industry projects"))
     st.caption(_ui_local("已套瓷的导师建议从『邮件记录』登记，以便计入看板指标。",
                          "For contacted professors, log them via 'Email Records' so they count in metrics."))
     if st.button(_ui_local("添加到导师库", "Add to Professor DB"), type="primary", use_container_width=True, key="db_new_submit"):
@@ -189,10 +192,11 @@ def add_professor_dialog():
                 "学校名称": p["univ"], "院系": p["dept"], "主页链接": p["home"],
                 "研究方向": p["dir"] or "未明确", "推荐级": p["prio"], "阶段": stage,
                 "面试时间": "", "更新时间": now, "创建时间": now, "关联邮件ID": "",
+                "备注": note.strip(),
             })
             save_db(cur)
             for k in ["db_new_pname", "db_new_puniv", "db_new_pdept", "db_new_pdir",
-                      "db_new_pemail", "db_new_phome", "db_new_country_manual"]:
+                      "db_new_pemail", "db_new_phome", "db_new_country_manual", "db_new_note"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -903,6 +907,17 @@ def show_resume_pdf_modal(pdf_path, title="简历"):
     else:
         st.warning(tr("找不到该简历文件。", "Resume file not found."))
 
+def clean_note(value):
+    """Normalize a 备注 value to a display string ('' when empty / NaN / placeholder)."""
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    return "" if text in ("", "-", "nan", "None") else text
+
+
 def get_dashboard_data():
     db = load_db()
     if not db:
@@ -1268,7 +1283,16 @@ def show_professor_details(row):
 
     if row.get('主页链接'):
         st.markdown(f"**{_ui_local('个人主页', 'Homepage')}:** [{row.get('主页链接')}]({row.get('主页链接')})")
-        
+
+    _note = clean_note(row.get('备注', ''))
+    if _note:
+        st.markdown(
+            f"<div style='margin:.4rem 0;padding:.5rem .65rem;border-left:3px solid #a78bfa;"
+            f"background:rgba(167,139,250,.10);border-radius:6px;font-size:14px;color:#d6cffb;"
+            f"white-space:pre-wrap;'>📝 {html.escape(_note)}</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
     
     prof_email = row.get("导师邮箱")
@@ -1973,6 +1997,14 @@ def main():
 
             with c3:
                 st.markdown(f"**{ui('研究方向', 'Research')}:**<br><span style='font-size:15px; color:#d6e4ff; font-weight:600;'>{row.get('研究方向', ui('未明确', 'N/A'))}</span>", unsafe_allow_html=True)
+                _note = clean_note(row.get('备注', ''))
+                if _note:
+                    st.markdown(
+                        f"<div style='margin:.3rem 0;padding:.4rem .55rem;border-left:3px solid #a78bfa;"
+                        f"background:rgba(167,139,250,.10);border-radius:6px;font-size:13px;color:#d6cffb;"
+                        f"white-space:pre-wrap;'>📝 {html.escape(_note)}</div>",
+                        unsafe_allow_html=True,
+                    )
                 st.markdown(f"**{ui('最后互动', 'Last update')}:** {row.get('更新时间', '')}")
                 st.markdown(f"**{ui('导师当地时间', 'Local time')}:** {format_local_time(row.get('国家/地区', '')).replace('未知', ui('未知', 'Unknown'))}")
                 # 操作按钮
@@ -2247,6 +2279,7 @@ def main():
                             "更新时间": now_str,
                             "创建时间": created_str,
                             "关联邮件ID": mail_id,
+                            "备注": "",
                         })
                         save_db(cur_db)
                         st.session_state["lite_saved_msg"] = ui(f"已登记导师 {prof_name} 并加入套瓷看板。", f"Added {prof_name} to the dashboard.")
@@ -3128,6 +3161,31 @@ def main():
                             st.caption(ui("研究方向：", "Research: ") + str(row.get("研究方向", "-")))
                             st.caption(ui("当地时间：", "Local time: ") + local_time)
                             st.caption(ui("更新：", "Updated: ") + str(row.get("更新时间", "-")))
+
+                            note_val = clean_note(row.get("备注", ""))
+                            if note_val:
+                                st.markdown(
+                                    f"<div style='margin:.35rem 0;padding:.45rem .6rem;border-left:3px solid #a78bfa;"
+                                    f"background:rgba(167,139,250,.10);border-radius:6px;font-size:13px;color:#d6cffb;"
+                                    f"white-space:pre-wrap;'>📝 {html.escape(note_val)}</div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                            with st.popover(ui("📝 备注", "📝 Note"), use_container_width=True):
+                                new_note = st.text_area(
+                                    ui("备注", "Note"),
+                                    value=note_val,
+                                    key=f"db_note_edit_{real_idx}",
+                                    placeholder=ui("例如：横向项目很多 / 回复很快", "e.g. lots of industry projects"),
+                                )
+                                if st.button(ui("保存备注", "Save note"), key=f"db_note_save_{real_idx}",
+                                             type="primary", use_container_width=True):
+                                    if 0 <= real_idx < len(current_db):
+                                        current_db[real_idx]["备注"] = new_note.strip()
+                                        save_db(current_db)
+                                        st.toast(ui("备注已保存", "Note saved"), icon="📝")
+                                        st.rerun()
+
                             if st.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
                                 st.session_state["db_delete_idx"] = real_idx
 
