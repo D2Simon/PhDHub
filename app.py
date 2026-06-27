@@ -80,18 +80,23 @@ COUNTRY_LABELS = {
 # __REQUIREMENTS__ 占位符会被用户在页面上填写的「我的需求」替换。
 IMPORT_PROMPT_TEMPLATE = """# 导师库批量导入 —— 给 GPT 的提示词
 
-用法：把下面「===」之间的全部内容复制给 ChatGPT，它会返回一个 JSON 文件；
-保存为 .json，回到 PhDHub「导师库管理 → 批量导入」上传即可。
+用法：把下面「===」之间的全部内容复制给 ChatGPT。它会先做检索计划与漏检自查，
+最后用 Python 工具把结果存成 JSON 文件，并给你一个**下载链接**；你点链接下载 .json，
+回到 PhDHub「导师库管理 → 批量导入」上传即可（无需手动复制粘贴）。
 
 ===
 
-你是一个学术导师信息整理助手。请根据我的需求，输出**一个 JSON 文件**，用于导入到我的导师管理系统。
+你是一个学术导师信息整理助手。请根据我的需求，整理一份导师名单，并把它存成一个 JSON 文件供我下载。
 
 ## 输出要求（必须严格遵守）
 
-1. 只输出一个 JSON 代码块，不要任何解释文字。
-2. 顶层是一个对象，唯一的键是 "professors"，值是导师对象的数组：{ "professors": [ {…}, {…} ] }
-3. 每个导师对象必须包含下列全部字段，键名一字不差（都是中文键名）：
+1. 请先按下方【执行流程】完成检索计划与漏检自查（这部分可简要写出来）。
+2. **最终结果必须用你的 Python 工具（代码解释器 / Advanced Data Analysis）写成一个文件并给我下载链接**，不要只把 JSON 贴在聊天里让我复制。具体做法：
+   - 用 Python 把最终名单写入文件 `phdhub_import.json`，务必 `json.dump(data, f, ensure_ascii=False, indent=2)`（保留中文、UTF-8 编码）。
+   - 文件保存到 `/mnt/data/phdhub_import.json`，然后给我一个可点击的下载链接。
+   - 如果你当前没有 Python / 代码解释器工具，再退而求其次：以一个完整的 JSON 代码块结尾（数组正确闭合、绝不截断），我自行复制保存。
+3. 顶层是一个对象，唯一的键是 "professors"，值是导师对象的数组：{ "professors": [ {…}, {…} ] }
+4. 每个导师对象必须包含下列全部字段，键名一字不差（都是中文键名）：
 
    - 导师/教授 ：老师姓名（必填）。英文母语老师用英文原名，中文老师可用中文。
    - 学校名称 ：学校（必填）。用学校官方英文全名，如 Stanford University、University of Oxford。
@@ -108,14 +113,29 @@ IMPORT_PROMPT_TEMPLATE = """# 导师库批量导入 —— 给 GPT 的提示词
    - 关联邮件ID ：一律填 ""。
    - 备注 ：可写一句话说明，不确定填 ""。
 
-4. 不要编造邮箱和主页链接。不确定就把对应字段留成空字符串 ""，我会自己补。研究方向、院系可基于公开认知合理填写。
-5. 学校名称用官方英文全名即可；我的系统会自动把它对齐到 QS 2026 前 500 的标准名并补上 QS 排名，所以带不带 "The"、大小写都没关系，但请不要写缩写（如别写 "MIT"，写全称）。
+5. 不要编造邮箱和主页链接。不确定就把对应字段留成空字符串 ""，我会自己补。研究方向、院系可基于公开认知合理填写。
+6. 学校名称用官方英文全名即可；我的系统会自动把它对齐到 QS 2026 前 500 的标准名并补上 QS 排名，所以带不带 "The"、大小写都没关系，但请不要写缩写（如别写 "MIT"，写全称）。
 
-6. **务必尽量列全，不要只挑几位代表。** 针对我下面指定的每一所目标学校 / 地区：
-   - 系统性地、按院系逐个梳理，把符合研究方向的老师**尽可能全部**列出，包含助理教授(Assistant Professor)、副教授(Associate Professor)、正教授(Full Professor)。
-   - 通常每所学校相关老师会有 10 位以上，请尽量穷尽，宁多勿少；不要在列出两三位后就停下。
-   - 如果一所学校相关老师很多，请继续往下列，直到把你确实了解的都列完。
-   - 唯一的底线：**只列真实存在的老师，不要为了凑数量编造不存在的人**；研究方向不完全确定时可合理归类。
+7. 【执行流程 ｜ 必须严格按顺序执行，不可跳过、不可偷懒】
+
+   第①步 制定检索计划（先把计划写出来）：
+     - 把我要的研究方向拆成 3-8 个子方向 / 同义关键词，包含交叉领域（例如「机器人」会横跨 CS、ECE、ME/MAE、AI/Robotics Institute、认知科学等）。
+     - 对每一所目标学校，逐一列出需要排查的院系 / 研究所 / 实验室清单（不要只看一个系）。
+
+   第②步 逐项排查（按计划机械执行）：
+     - 对【每一所学校 × 每一个相关院系 / 实验室】逐格排查，把符合方向的老师全部记录下来。
+     - 覆盖所有职级：助理教授(Assistant)、副教授(Associate)、正教授(Full / Chair)，以及 Lecturer / Research Fellow / PI。
+     - 不要在一所学校只列两三位就跳到下一所；先把这所学校扫完，再去下一所。
+
+   第③步 漏检自查（输出前必做一遍 review，逐条核对，发现遗漏就补回去）：
+     - 每所学校的每个相关院系，是否都排查过了？有没有漏掉的系或实验室？
+     - 是否漏掉了交叉学科的老师（同一方向可能挂在不同院系 / 学院）？
+     - 是否漏掉了：① 刚入职的年轻 faculty；② 非常知名的资深教授；③ 第一直觉之外、但确实做该方向的人？
+     - 把自查中新想到的老师补进名单，重复本步，直到再也想不出新的为止。
+
+   第④步 输出：用 Python 工具把最终名单写入 `/mnt/data/phdhub_import.json`（UTF-8、ensure_ascii=False），并给我一个可点击的下载链接（见上方「输出要求」第 2 条）。
+
+   底线：**只列真实存在的老师，绝不为凑数编造**；研究方向不完全确定时可合理归类，但人必须是真实的。
 
 ## 输出示例（格式参照——实际请按「我的需求」尽量多列，不要只给一条）
 
@@ -1079,6 +1099,38 @@ def confirm_delete_dialog(prof_name, univ_name, delete_idx=None):
             st.success(tr("已移出看板（导师保留在导师库，状态为未联系）。",
                           "Removed from board (kept in Professor DB as 未联系)."))
             st.rerun()
+
+
+@st.dialog("批量删除确认 / Confirm bulk delete")
+def bulk_delete_dialog(idxs):
+    """弹窗确认批量删除选中的导师（彻底从导师库移除）。"""
+    db = load_db()
+    valid = [i for i in idxs if 0 <= i < len(db)]
+    if not valid:
+        st.info(_ui_local("没有可删除的记录。", "Nothing to delete."))
+        if st.button(_ui_local("关闭", "Close"), use_container_width=True):
+            st.rerun()
+        return
+    st.warning(_ui_local(f"确认彻底删除选中的 {len(valid)} 位导师？此操作不可恢复，关联邮件记录也会一并清除。",
+                         f"Permanently delete the {len(valid)} selected professors? This cannot be undone; linked email records are also removed."))
+    preview = "、".join(f"{db[i].get('导师/教授', '未知')}（{db[i].get('学校名称', '未知')}）" for i in valid[:10])
+    if len(valid) > 10:
+        preview += _ui_local(f" …等 {len(valid)} 位", f" …and {len(valid)} total")
+    st.caption(preview)
+    c1, c2 = st.columns(2)
+    if c1.button(_ui_local("取消", "Cancel"), use_container_width=True, key="bulkdlg_cancel"):
+        st.rerun()
+    if c2.button(_ui_local(f"确认删除 {len(valid)} 位", f"Delete {len(valid)}"),
+                 type="primary", use_container_width=True, key="bulkdlg_confirm"):
+        for i in sorted(valid, reverse=True):
+            purge_lite_emails_for_record(db[i])
+            db.pop(i)
+        save_db(db)
+        for _k in [k for k in list(st.session_state) if str(k).startswith("db_sel_")]:
+            st.session_state.pop(_k, None)
+        st.session_state["db_bulk_import_toast"] = _ui_local(
+            f"已删除 {len(valid)} 位导师。", f"Deleted {len(valid)} professors.")
+        st.rerun()
 
 
 @st.dialog("简历预览 / Resume Preview")
@@ -3334,10 +3386,10 @@ def main():
         with st.expander(ui("📥 批量导入导师（用 GPT 生成文件）", "📥 Bulk-import professors (generate the file with GPT)"), expanded=False):
             st.markdown(ui(
                 "**第 1 步**：填写你的需求 → 点「生成并下载提示词」。\n\n"
-                "**第 2 步**：把下载的内容整段贴给 ChatGPT，拿到它返回的 JSON，保存为 `.json`。\n\n"
+                "**第 2 步**：把下载的内容整段贴给 ChatGPT（建议用带代码解释器的模型，如 GPT‑5 Thinking）。它会把结果存成文件并给你一个 `.json` **下载链接**，点链接下载即可——无需手动复制粘贴。\n\n"
                 "**第 3 步**：在下方上传该 JSON 完成导入。系统会自动把学校名对齐到 QS 2026 前 500 标准名、补上 QS 排名。",
                 "**Step 1**: fill in your request → click 'Generate & download prompt'.\n\n"
-                "**Step 2**: paste it whole into ChatGPT, take the JSON it returns, save as `.json`.\n\n"
+                "**Step 2**: paste it whole into ChatGPT (use a model with the code-interpreter tool). It saves the result to a file and gives you a `.json` **download link** — no copy-paste needed.\n\n"
                 "**Step 3**: upload that JSON below. The system auto-aligns school names to the QS 2026 top-500 and fills QS rank."))
 
             # 表单值持久化：会话首次进入时，从本地配置回填（重启后仍可复用）
@@ -3487,7 +3539,7 @@ def main():
                 if selected_idxs:
                     if bc3.button(ui(f"🗑 删除选中（{len(selected_idxs)}）", f"🗑 Delete selected ({len(selected_idxs)})"),
                                   key="db_bulk_delete_btn", type="primary", use_container_width=True):
-                        st.session_state["db_bulk_delete"] = list(selected_idxs)
+                        bulk_delete_dialog(list(selected_idxs))
                 else:
                     bc3.caption(ui("勾选卡片左上角的复选框可批量删除。", "Tick the box on each card to bulk-delete."))
 
@@ -3546,34 +3598,6 @@ def main():
                                 edit_professor_dialog(real_idx)
                             if del_col.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
                                 st.session_state["db_delete_idx"] = real_idx
-
-            if "db_bulk_delete" in st.session_state:
-                bulk_idxs = [i for i in st.session_state["db_bulk_delete"] if 0 <= i < len(current_db)]
-                if not bulk_idxs:
-                    st.session_state.pop("db_bulk_delete", None)
-                else:
-                    names_preview = "、".join(
-                        f"{current_db[i].get('导师/教授', '未知')}（{current_db[i].get('学校名称', '未知')}）"
-                        for i in bulk_idxs[:8])
-                    if len(bulk_idxs) > 8:
-                        names_preview += f" …+{len(bulk_idxs) - 8}"
-                    st.warning(ui(f"确认删除选中的 {len(bulk_idxs)} 位导师？\n\n{names_preview}",
-                                  f"Delete the {len(bulk_idxs)} selected professors?\n\n{names_preview}"))
-                    bd1, bd2 = st.columns(2)
-                    if bd1.button(ui("取消", "Cancel"), key="db_bulk_del_cancel", use_container_width=True):
-                        st.session_state.pop("db_bulk_delete", None)
-                        st.rerun()
-                    if bd2.button(ui("确认删除", "Confirm Delete"), key="db_bulk_del_confirm",
-                                  use_container_width=True, type="primary"):
-                        for i in sorted(bulk_idxs, reverse=True):
-                            purge_lite_emails_for_record(current_db[i])
-                            current_db.pop(i)
-                        save_db(current_db)
-                        for _k in [k for k in list(st.session_state) if str(k).startswith("db_sel_")]:
-                            st.session_state.pop(_k, None)
-                        st.session_state.pop("db_bulk_delete", None)
-                        st.success(ui(f"已删除 {len(bulk_idxs)} 位导师。", f"Deleted {len(bulk_idxs)} professors."))
-                        st.rerun()
 
             if "db_delete_idx" in st.session_state:
                 idx_to_del = st.session_state["db_delete_idx"]
