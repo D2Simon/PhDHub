@@ -55,17 +55,16 @@ from phdhub.storage import (
     save_lite_emails,
 )
 from phdhub.timezone_utils import format_local_time
-from phdhub.university import get_world_universities as get_world_universities_impl
+from phdhub.university import (
+    get_world_universities as get_world_universities_impl,
+    canonical_school_name,
+    qs_rank_for,
+    country_for,
+)
+# 洲 -> 国家/地区 级联数据：来自内置 QS2026 前500 静态清单（唯一标准）
+from phdhub.qs_top500 import CONTINENTS
 
 
-# 洲 -> 国家/地区 级联数据（值用英文，便于地图 ISO 与时区匹配；显示为双语）
-CONTINENTS = {
-    "亚洲 / Asia": ["China", "Hong Kong", "Taiwan", "Singapore", "Japan", "South Korea", "Malaysia"],
-    "欧洲 / Europe": ["United Kingdom", "Germany", "France", "Netherlands", "Switzerland", "Sweden", "Denmark", "Norway", "Finland", "Italy", "Spain", "Ireland", "Austria", "Belgium"],
-    "北美洲 / North America": ["United States", "Canada", "Mexico"],
-    "大洋洲 / Oceania": ["Australia", "New Zealand"],
-    "其他 / Other": [],
-}
 COUNTRY_LABELS = {
     "China": "China 中国", "Hong Kong": "Hong Kong 香港", "Taiwan": "Taiwan 台湾",
     "Singapore": "Singapore 新加坡", "Japan": "Japan 日本", "South Korea": "South Korea 韩国",
@@ -76,6 +75,95 @@ COUNTRY_LABELS = {
     "Belgium": "Belgium 比利时", "United States": "United States 美国", "Canada": "Canada 加拿大",
     "Mexico": "Mexico 墨西哥", "Australia": "Australia 澳大利亚", "New Zealand": "New Zealand 新西兰",
 }
+
+# 批量导入：给 GPT 的提示词模板（站内填好需求后生成下载，整段贴给 ChatGPT）
+# __REQUIREMENTS__ 占位符会被用户在页面上填写的「我的需求」替换。
+IMPORT_PROMPT_TEMPLATE = """# 导师库批量导入 —— 给 GPT 的提示词
+
+用法：把下面「===」之间的全部内容复制给 ChatGPT，它会返回一个 JSON 文件；
+保存为 .json，回到 PhDHub「导师库管理 → 批量导入」上传即可。
+
+===
+
+你是一个学术导师信息整理助手。请根据我的需求，输出**一个 JSON 文件**，用于导入到我的导师管理系统。
+
+## 输出要求（必须严格遵守）
+
+1. 只输出一个 JSON 代码块，不要任何解释文字。
+2. 顶层是一个对象，唯一的键是 "professors"，值是导师对象的数组：{ "professors": [ {…}, {…} ] }
+3. 每个导师对象必须包含下列全部字段，键名一字不差（都是中文键名）：
+
+   - 导师/教授 ：老师姓名（必填）。英文母语老师用英文原名，中文老师可用中文。
+   - 学校名称 ：学校（必填）。用学校官方英文全名，如 Stanford University、University of Oxford。
+   - 导师邮箱 ：邮箱（选填）。不确定就留空字符串 ""，不要编造邮箱。
+   - 国家/地区 ：学校所在国家/地区的英文名（选填），如 United States、United Kingdom、Hong Kong、China；不确定填 "未知"。
+   - 院系 ：学院/系（选填）。如 Computer Science、Robotics Institute；不确定填 ""。
+   - 主页链接 ：个人主页（选填）。完整 URL（http/https 开头）；不确定就留空 ""，不要编造链接。
+   - 研究方向 ：研究方向（选填）。几个关键词用逗号分隔，如 Robotics, Reinforcement Learning；不确定填 "未明确"。
+   - 推荐级 ：只能是 "T0" / "T1" / "T2"，默认 "T1"。
+   - 阶段 ：新导入一律填 "未联系"。
+   - 面试时间 ：一律填 ""。
+   - 更新时间 ：一律填 ""。
+   - 创建时间 ：一律填 ""。
+   - 关联邮件ID ：一律填 ""。
+   - 备注 ：可写一句话说明，不确定填 ""。
+
+4. 不要编造邮箱和主页链接。不确定就把对应字段留成空字符串 ""，我会自己补。研究方向、院系可基于公开认知合理填写。
+5. 学校名称用官方英文全名即可；我的系统会自动把它对齐到 QS 2026 前 500 的标准名并补上 QS 排名，所以带不带 "The"、大小写都没关系，但请不要写缩写（如别写 "MIT"，写全称）。
+
+6. **务必尽量列全，不要只挑几位代表。** 针对我下面指定的每一所目标学校 / 地区：
+   - 系统性地、按院系逐个梳理，把符合研究方向的老师**尽可能全部**列出，包含助理教授(Assistant Professor)、副教授(Associate Professor)、正教授(Full Professor)。
+   - 通常每所学校相关老师会有 10 位以上，请尽量穷尽，宁多勿少；不要在列出两三位后就停下。
+   - 如果一所学校相关老师很多，请继续往下列，直到把你确实了解的都列完。
+   - 唯一的底线：**只列真实存在的老师，不要为了凑数量编造不存在的人**；研究方向不完全确定时可合理归类。
+
+## 输出示例（格式参照——实际请按「我的需求」尽量多列，不要只给一条）
+
+{
+  "professors": [
+    {
+      "导师/教授": "Sergey Levine",
+      "学校名称": "University of California, Berkeley",
+      "导师邮箱": "",
+      "国家/地区": "United States",
+      "院系": "Electrical Engineering and Computer Sciences",
+      "主页链接": "https://people.eecs.berkeley.edu/~svlevine/",
+      "研究方向": "Robotics, Reinforcement Learning, Robot Learning",
+      "推荐级": "T1",
+      "阶段": "未联系",
+      "面试时间": "",
+      "更新时间": "",
+      "创建时间": "",
+      "关联邮件ID": "",
+      "备注": ""
+    }
+  ]
+}
+
+## 我的需求
+
+__REQUIREMENTS__
+
+===
+"""
+
+
+def build_import_prompt(direction, regions, count, extra):
+    """把用户在页面填写的需求，套进提示词模板的「我的需求」段落。"""
+    lines = []
+    if str(direction).strip():
+        lines.append(f"研究方向：{direction.strip()}")
+    if str(regions).strip():
+        lines.append(f"地区 / 学校：{regions.strip()}")
+    if str(count).strip():
+        lines.append(f"数量：{count.strip()}")
+    else:
+        lines.append("数量：尽可能列全，每所学校把符合方向的老师都列出来（宁多勿少，不要只给两三位）。")
+    if str(extra).strip():
+        lines.append(f"补充说明：{extra.strip()}")
+    if not str(direction).strip() and not str(regions).strip():
+        lines.insert(0, "（请补充：研究方向、目标地区/学校）")
+    return IMPORT_PROMPT_TEMPLATE.replace("__REQUIREMENTS__", "\n".join(lines))
 
 
 def _ui_local(zh, en):
@@ -188,11 +276,12 @@ def add_professor_dialog():
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cur = load_db()
             cur.append({
-                "导师/教授": p["name"], "导师邮箱": p["email"], "国家/地区": p["country"] or "未知",
-                "学校名称": p["univ"], "院系": p["dept"], "主页链接": p["home"],
+                "导师/教授": p["name"], "导师邮箱": p["email"],
+                "国家/地区": (country_for(p["univ"]) or p["country"] or "未知"),
+                "学校名称": canonical_school_name(p["univ"]), "院系": p["dept"], "主页链接": p["home"],
                 "研究方向": p["dir"] or "未明确", "推荐级": p["prio"], "阶段": stage,
                 "面试时间": "", "更新时间": now, "创建时间": now, "关联邮件ID": "",
-                "备注": note.strip(),
+                "备注": note.strip(), "来源": "手动", "QS排名": qs_rank_for(p["univ"]),
             })
             save_db(cur)
             for k in ["db_new_pname", "db_new_puniv", "db_new_pdept", "db_new_pdir",
@@ -289,8 +378,8 @@ def edit_professor_dialog(real_idx):
             return
         cur[real_idx].update({
             "导师/教授": name.strip(),
-            "学校名称": univ.strip(),
-            "国家/地区": country.strip() or "未知",
+            "学校名称": canonical_school_name(univ.strip()),
+            "国家/地区": (country_for(univ.strip()) or country.strip() or "未知"),
             "院系": dept.strip(),
             "研究方向": direction.strip() or "未明确",
             "导师邮箱": email.strip(),
@@ -298,6 +387,7 @@ def edit_professor_dialog(real_idx):
             "推荐级": prio,
             "阶段": stage,
             "备注": note.strip(),
+            "QS排名": qs_rank_for(univ.strip()),
             "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
         save_db(cur)
@@ -2060,9 +2150,31 @@ def main():
         else:
             active_df = df
 
-        # 大洲 / 国家 筛选
+        # 大洲 / 国家 / 阶段 筛选
         all_label = ui("全部", "All")
-        fcol1, fcol2, _fc = st.columns([1, 1, 4])
+        # 活跃流程的阶段（不含「未联系」），并提供「面试环节」等快捷分组
+        ACTIVE_STAGES = ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复",
+                         "面试预约阶段", "面试结束阶段", "口头offer"]
+        STAGE_GROUPS = {
+            ui("📨 首封邮件", "📨 First email"): ["已发首封邮件"],
+            ui("💬 收到回复", "💬 Got reply"): ["收到积极回复", "收到中等回复", "收到消极回复"],
+            ui("🎤 面试环节", "🎤 Interview"): ["面试预约阶段", "面试结束阶段"],
+            ui("🎉 口头 offer", "🎉 Verbal offer"): ["口头offer"],
+        }
+        STAGE_EN = {
+            "已发首封邮件": "First email sent", "收到积极回复": "Positive reply",
+            "收到中等回复": "Neutral reply", "收到消极回复": "Negative reply",
+            "面试预约阶段": "Interview scheduled", "面试结束阶段": "Interview done",
+            "口头offer": "Verbal offer",
+        }
+        stage_options = [all_label] + list(STAGE_GROUPS.keys()) + ACTIVE_STAGES
+
+        def _stage_fmt(s):
+            if s == all_label or s in STAGE_GROUPS:
+                return s
+            return STAGE_EN.get(s, s) if st.session_state.get("app_lang") == "en" else s
+
+        fcol1, fcol2, fcol3, _fc = st.columns([1, 1, 1.3, 2.7])
         with fcol1:
             cont_sel = st.selectbox(ui("大洲", "Continent"), [all_label] + list(CONTINENTS.keys()), key="dash_cont")
         with fcol2:
@@ -2072,10 +2184,15 @@ def main():
                 country_pool = sorted({str(c) for c in active_df.get("国家/地区", pd.Series(dtype=str)).tolist() if str(c).strip()})
             country_sel = st.selectbox(ui("国家 / 地区", "Country / Region"), [all_label] + country_pool,
                                        format_func=lambda c: COUNTRY_LABELS.get(c, c), key="dash_country")
+        with fcol3:
+            stage_sel = st.selectbox(ui("阶段", "Stage"), stage_options, format_func=_stage_fmt, key="dash_stage")
         if cont_sel != all_label and "国家/地区" in active_df.columns:
             active_df = active_df[active_df["国家/地区"].isin(CONTINENTS.get(cont_sel, []))]
         if country_sel != all_label and "国家/地区" in active_df.columns:
             active_df = active_df[active_df["国家/地区"].astype(str) == country_sel]
+        if stage_sel != all_label and "阶段" in active_df.columns:
+            wanted_stages = STAGE_GROUPS.get(stage_sel, [stage_sel])
+            active_df = active_df[active_df["阶段"].astype(str).isin(wanted_stages)]
 
         if active_df.empty:
             st.caption(ui("暂无进行中的套瓷记录。未联系的导师可在『导师库管理』中查看。",
@@ -2181,6 +2298,7 @@ def main():
 
         st.divider()
         st.subheader(ui("导入资料", "Import"))
+
         up = st.file_uploader(ui("选择备份文件 (JSON)", "Backup file (JSON)"), type=["json"], key="data_import_file")
         replace_label = ui("清空后导入", "Replace all")
         merge_label = ui("合并导入（保留现有）", "Merge (keep existing)")
@@ -2372,8 +2490,8 @@ def main():
                         cur_db.append({
                             "导师/教授": prof_name,
                             "导师邮箱": prof_email,
-                            "国家/地区": new_prof["country"] or "未知",
-                            "学校名称": new_prof["univ"],
+                            "国家/地区": (country_for(new_prof["univ"]) or new_prof["country"] or "未知"),
+                            "学校名称": canonical_school_name(new_prof["univ"]),
                             "院系": new_prof["dept"],
                             "主页链接": new_prof["home"],
                             "研究方向": new_prof["dir"] or "未明确",
@@ -2384,6 +2502,8 @@ def main():
                             "创建时间": created_str,
                             "关联邮件ID": mail_id,
                             "备注": "",
+                            "来源": "手动",
+                            "QS排名": qs_rank_for(new_prof["univ"]),
                         })
                         save_db(cur_db)
                         st.session_state["lite_saved_msg"] = ui(f"已登记导师 {prof_name} 并加入套瓷看板。", f"Added {prof_name} to the dashboard.")
@@ -3090,8 +3210,8 @@ def main():
                                     new_row = {
                                         "导师/教授": prof_name,
                                         "导师邮箱": prof_email,
-                                        "国家/地区": final_country if final_country else "未知",
-                                        "学校名称": final_univ,
+                                        "国家/地区": (country_for(final_univ) or final_country or "未知"),
+                                        "学校名称": canonical_school_name(final_univ),
                                         "院系": department,
                                         "主页链接": homepage if homepage else "",
                                         "研究方向": direction if direction else "未明确",
@@ -3100,7 +3220,9 @@ def main():
                                         "面试时间": interview_time,
                                         "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                         "创建时间": mail_dt,
-                                        "关联邮件ID": mail_id
+                                        "关联邮件ID": mail_id,
+                                        "来源": "手动",
+                                        "QS排名": qs_rank_for(final_univ),
                                     }
                                     current_db.append(new_row)
                                     save_db(current_db)
@@ -3199,9 +3321,103 @@ def main():
         st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>{ui('此处聚合所有导师：既有已套瓷的，也可以是还没套瓷、仅作为目标登记的。', 'All professors live here — both contacted ones and not-yet-contacted targets.')}</p>", unsafe_allow_html=True)
 
         top_l, top_r = st.columns([3, 1])
+        with top_l:
+            bulk_mode = st.toggle(ui("🗑 批量删除模式", "🗑 Bulk delete mode"), key="db_bulk_mode")
         with top_r:
             if st.button(ui("＋ 新建导师", "＋ Add professor"), type="primary", use_container_width=True, key="db_open_add"):
                 add_professor_dialog()
+
+        _bulk_toast = st.session_state.pop("db_bulk_import_toast", None)
+        if _bulk_toast:
+            st.toast(_bulk_toast, icon="✅")
+
+        with st.expander(ui("📥 批量导入导师（用 GPT 生成文件）", "📥 Bulk-import professors (generate the file with GPT)"), expanded=False):
+            st.markdown(ui(
+                "**第 1 步**：填写你的需求 → 点「生成并下载提示词」。\n\n"
+                "**第 2 步**：把下载的内容整段贴给 ChatGPT，拿到它返回的 JSON，保存为 `.json`。\n\n"
+                "**第 3 步**：在下方上传该 JSON 完成导入。系统会自动把学校名对齐到 QS 2026 前 500 标准名、补上 QS 排名。",
+                "**Step 1**: fill in your request → click 'Generate & download prompt'.\n\n"
+                "**Step 2**: paste it whole into ChatGPT, take the JSON it returns, save as `.json`.\n\n"
+                "**Step 3**: upload that JSON below. The system auto-aligns school names to the QS 2026 top-500 and fills QS rank."))
+
+            # 表单值持久化：会话首次进入时，从本地配置回填（重启后仍可复用）
+            if not st.session_state.get("_db_tpl_loaded"):
+                _saved_reqs = load_config().get("import_tpl_reqs", {}) or {}
+                for _sk, _sf in [("db_tpl_dir", "dir"), ("db_tpl_region", "region"),
+                                 ("db_tpl_count", "count"), ("db_tpl_extra", "extra")]:
+                    if _sk not in st.session_state:
+                        st.session_state[_sk] = _saved_reqs.get(_sf, "")
+                st.session_state["_db_tpl_loaded"] = True
+
+            st.markdown(f"**{ui('① 填写需求', '① Your request')}**")
+            rq1, rq2 = st.columns(2)
+            req_dir = rq1.text_input(ui("研究方向", "Research area"), key="db_tpl_dir",
+                                     placeholder=ui("如：Robotics / 具身智能 / 计算机视觉", "e.g. Robotics / Embodied AI / CV"))
+            req_region = rq2.text_input(ui("地区 / 目标学校", "Region / target schools"), key="db_tpl_region",
+                                        placeholder=ui("如：美国、香港 或 ANU、NUS", "e.g. US, Hong Kong or ANU, NUS"))
+            rq3, rq4 = st.columns(2)
+            req_count = rq3.text_input(ui("数量（留空=尽量列全）", "Count (blank = as many as possible)"), key="db_tpl_count",
+                                       placeholder=ui("留空则尽量列全 / 或填如：每校至少 10 位", "blank = exhaustive / or e.g. 10+ per school"))
+            req_extra = rq4.text_input(ui("补充说明（选填）", "Extra notes (optional)"), key="db_tpl_extra",
+                                       placeholder=ui("如：只要做视觉、排除纯硬件方向", "e.g. CV only, exclude pure-hardware"))
+
+            prompt_text = build_import_prompt(req_dir, req_region, req_count, req_extra)
+            if st.download_button(
+                ui("⬇ 生成并下载提示词", "⬇ Generate & download prompt"),
+                data=prompt_text.encode("utf-8"),
+                file_name="导师库导入_GPT提示词.md",
+                mime="text/markdown",
+                type="primary",
+                use_container_width=True,
+                key="db_import_prompt_tpl_btn",
+            ):
+                # 记住这次填写的需求，下次自动带出
+                _cfg = load_config()
+                _cfg["import_tpl_reqs"] = {"dir": req_dir, "region": req_region,
+                                          "count": req_count, "extra": req_extra}
+                save_config(_cfg)
+            st.caption(ui("✓ 你填写的需求会自动记住，下次打开仍在。", "✓ Your inputs are remembered for next time."))
+            with st.popover(ui("预览提示词", "Preview prompt"), use_container_width=True):
+                st.code(prompt_text, language="markdown")
+
+            st.divider()
+            st.markdown(f"**{ui('② 上传 GPT 生成的 JSON', '② Upload the JSON from GPT')}**")
+            db_up = st.file_uploader(ui("上传导师 JSON 文件", "Upload professor JSON file"), type=["json"], key="db_import_file")
+            st.caption(ui("导入方式：合并导入（保留现有，按姓名+学校自动去重）。",
+                          "Import mode: merge — keeps existing records, de-duplicated by name + school."))
+            if db_up is not None and st.button(ui("执行导入", "Import"), type="primary", key="db_import_btn"):
+                try:
+                    db_payload = json.loads(db_up.getvalue().decode("utf-8"))
+                    if isinstance(db_payload, list):
+                        imp_profs = db_payload
+                    else:
+                        imp_profs = db_payload.get("professors", []) or []
+                    imp_profs = [p for p in imp_profs
+                                 if str(p.get("导师/教授", "")).strip() and str(p.get("学校名称", "")).strip()]
+                    # 归一化：学校名对齐到权威清单、按校名回填 QS 排名与国家、打来源标记
+                    for p in imp_profs:
+                        canon = canonical_school_name(str(p.get("学校名称", "")).strip())
+                        p["学校名称"] = canon
+                        p["QS排名"] = qs_rank_for(canon)
+                        _qs_country = country_for(canon)
+                        if _qs_country:
+                            p["国家/地区"] = _qs_country
+                        elif not str(p.get("国家/地区", "")).strip():
+                            p["国家/地区"] = "未知"
+                        p["来源"] = "批量导入"
+                    if not imp_profs:
+                        st.error(ui("文件里没有有效导师记录（需至少含「导师/教授」和「学校名称」）。",
+                                    "No valid professor records found (each needs 「导师/教授」 and 「学校名称」)."))
+                    else:
+                        # 始终合并导入：保留现有，按姓名+学校去重
+                        new_db, _ = dedupe_db(load_db() + imp_profs)
+                        save_db(new_db)
+                        st.session_state["db_bulk_import_toast"] = ui(
+                            f"成功导入 {len(imp_profs)} 条，导师库现有 {len(new_db)} 位。",
+                            f"Imported {len(imp_profs)} records; DB now has {len(new_db)} professors.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(ui(f"导入失败：{e}", f"Import failed: {e}"))
 
         current_db = load_db()
         if not current_db:
@@ -3254,6 +3470,27 @@ def main():
 
             st.markdown(f"#### {ui('导师列表', 'Professor List')}")
             rows = list(filtered_df.reset_index().iterrows())
+            visible_idxs = [int(r["index"]) for _, r in rows]
+
+            # 批量操作栏：仅在「批量删除模式」开启时显示
+            selected_idxs = [vi for vi in visible_idxs if st.session_state.get(f"db_sel_{vi}", False)]
+            if bulk_mode:
+                bc1, bc2, bc3 = st.columns([1, 1, 2])
+                if bc1.button(ui("全选当前", "Select all"), key="db_bulk_select_all", use_container_width=True):
+                    for vi in visible_idxs:
+                        st.session_state[f"db_sel_{vi}"] = True
+                    st.rerun()
+                if bc2.button(ui("清除选择", "Clear"), key="db_bulk_clear", use_container_width=True):
+                    for vi in visible_idxs:
+                        st.session_state[f"db_sel_{vi}"] = False
+                    st.rerun()
+                if selected_idxs:
+                    if bc3.button(ui(f"🗑 删除选中（{len(selected_idxs)}）", f"🗑 Delete selected ({len(selected_idxs)})"),
+                                  key="db_bulk_delete_btn", type="primary", use_container_width=True):
+                        st.session_state["db_bulk_delete"] = list(selected_idxs)
+                else:
+                    bc3.caption(ui("勾选卡片左上角的复选框可批量删除。", "Tick the box on each card to bulk-delete."))
+
             per_row = 3
             for i in range(0, len(rows), per_row):
                 cols = st.columns(per_row)
@@ -3267,11 +3504,25 @@ def main():
                     homepage = str(row.get("主页链接", "") or "")
                     with cols[j]:
                         with st.container(border=True):
+                            if bulk_mode:
+                                st.checkbox(ui("选择", "Select"), key=f"db_sel_{real_idx}")
                             if homepage.strip():
                                 st.markdown(f"#### <a href='{homepage}' target='_blank' style='text-decoration:none;color:inherit;'>{prof}</a>", unsafe_allow_html=True)
                             else:
                                 st.markdown(f"#### {prof}")
-                            st.markdown(f"<span class='tag'>{row.get('阶段', '-')}</span>", unsafe_allow_html=True)
+                            _src = str(row.get("来源", "") or "").strip()
+                            _src_badge = ""
+                            if _src and _src != "-":
+                                _src_color = "#34d399" if _src == ui("批量导入", "Bulk import") or _src == "批量导入" else "#93c5fd"
+                                _src_badge = (f"<span style='margin-left:.4rem;font-size:11px;padding:1px 7px;border-radius:8px;"
+                                              f"background:rgba(148,163,184,.15);color:{_src_color};border:1px solid {_src_color}55;'>"
+                                              f"{html.escape(_src)}</span>")
+                            qs_rank = str(row.get("QS排名", "") or "").strip()
+                            qs_badge = ""
+                            if qs_rank and qs_rank not in ("-", "0"):
+                                qs_badge = (f"<span style='margin-left:.4rem;font-size:11px;padding:1px 7px;border-radius:8px;"
+                                            f"background:rgba(167,139,250,.15);color:#c4b5fd;border:1px solid #a78bfa55;'>QS #{html.escape(qs_rank)}</span>")
+                            st.markdown(f"<span class='tag'>{row.get('阶段', '-')}</span>{_src_badge}{qs_badge}", unsafe_allow_html=True)
                             st.markdown(f"**{row.get('学校名称', '-')}**")
                             dept = str(row.get("院系", "") or "").strip()
                             st.caption(f"{row.get('国家/地区', '-')}" + (f" · {dept}" if dept and dept != "-" else ""))
@@ -3295,6 +3546,34 @@ def main():
                                 edit_professor_dialog(real_idx)
                             if del_col.button(ui("删除", "Delete"), key=f"db_del_btn_{real_idx}", use_container_width=True):
                                 st.session_state["db_delete_idx"] = real_idx
+
+            if "db_bulk_delete" in st.session_state:
+                bulk_idxs = [i for i in st.session_state["db_bulk_delete"] if 0 <= i < len(current_db)]
+                if not bulk_idxs:
+                    st.session_state.pop("db_bulk_delete", None)
+                else:
+                    names_preview = "、".join(
+                        f"{current_db[i].get('导师/教授', '未知')}（{current_db[i].get('学校名称', '未知')}）"
+                        for i in bulk_idxs[:8])
+                    if len(bulk_idxs) > 8:
+                        names_preview += f" …+{len(bulk_idxs) - 8}"
+                    st.warning(ui(f"确认删除选中的 {len(bulk_idxs)} 位导师？\n\n{names_preview}",
+                                  f"Delete the {len(bulk_idxs)} selected professors?\n\n{names_preview}"))
+                    bd1, bd2 = st.columns(2)
+                    if bd1.button(ui("取消", "Cancel"), key="db_bulk_del_cancel", use_container_width=True):
+                        st.session_state.pop("db_bulk_delete", None)
+                        st.rerun()
+                    if bd2.button(ui("确认删除", "Confirm Delete"), key="db_bulk_del_confirm",
+                                  use_container_width=True, type="primary"):
+                        for i in sorted(bulk_idxs, reverse=True):
+                            purge_lite_emails_for_record(current_db[i])
+                            current_db.pop(i)
+                        save_db(current_db)
+                        for _k in [k for k in list(st.session_state) if str(k).startswith("db_sel_")]:
+                            st.session_state.pop(_k, None)
+                        st.session_state.pop("db_bulk_delete", None)
+                        st.success(ui(f"已删除 {len(bulk_idxs)} 位导师。", f"Deleted {len(bulk_idxs)} professors."))
+                        st.rerun()
 
             if "db_delete_idx" in st.session_state:
                 idx_to_del = st.session_state["db_delete_idx"]

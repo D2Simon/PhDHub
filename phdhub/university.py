@@ -1,123 +1,106 @@
-"""University source and ranking helpers."""
+"""University source, QS-rank lookup, and school-name normalization.
+
+Backed by a built-in static QS World University Rankings 2026 top-500 list
+(``phdhub/qs_top500.py``) so the dropdown, the QS-rank lookup and the
+import-time name normalization all share one source of truth — manual entries
+and bulk imports therefore always store the exact same school string.
+"""
 
 import re
+import unicodedata
 
-import requests
+from phdhub.qs_top500 import QS_TOP500, QS_EDITION, CONTINENTS, COUNTRY_FLAG
 
-QS_2025_TOP_100 = [
-    "Massachusetts Institute of Technology", "Imperial College London", "University of Oxford", "Harvard University",
-    "University of Cambridge", "Stanford University", "ETH Zurich", "National University of Singapore", "University College London",
-    "California Institute of Technology", "University of Pennsylvania", "University of California, Berkeley", "University of Melbourne",
-    "Peking University", "Nanyang Technological University", "Cornell University", "University of Hong Kong", "University of Sydney",
-    "University of New South Wales", "Tsinghua University", "University of Chicago", "Princeton University", "Yale University",
-    "PSL", "Ecole Polytechnique Federale de Lausanne", "Johns Hopkins University", "University of Edinburgh", "Technical University of Munich",
-    "McGill University", "Australian National University", "Columbia University", "University of Tokyo", "University of California, Los Angeles",
-    "University of Manchester", "King's College London", "Chinese University of Hong Kong", "New York University", "Fudan University",
-    "Shanghai Jiao Tong University", "King Abdulaziz University", "Seoul National University", "Zhejiang University", "Monash University",
-    "University of Queensland", "London School of Economics", "Kyoto University", "Hong Kong University of Science and Technology",
-    "Delft University of Technology", "Northwestern University", "University of Amsterdam", "University of Bristol", "KAIST",
-    "Sorbonne University", "Duke University", "University of Texas at Austin", "Ludwig-Maximilians-Universität", "Hong Kong Polytechnic University",
-    "KU Leuven", "University of California, San Diego", "Universiti Malaya", "University of Washington", "University of Warwick",
-    "City University of Hong Kong", "University of Illinois", "University of Auckland", "National Taiwan University", "Universidad de Buenos Aires",
-    "University of St Andrews", "University of Birmingham", "Yonsei University", "Tohoku University", "Osaka University",
-    "Trinity College Dublin", "Korea University", "University of Leeds", "University of Glasgow", "University of Western Australia",
-    "University of Southampton", "Brown University", "Penn State University", "Lund University", "University of Adelaide",
-    "KTH Royal Institute of Technology", "University of Sheffield", "Uppsala University", "University of Copenhagen", "Purdue University",
-    "Boston University", "University of Nottingham", "Washington University in St. Louis", "University of Sao Paulo", "University of Helsinki",
-    "RMIT", "Aarhus University", "University of Geneva", "University of Oslo", "Georgia Institute of Technology", "University of Zurich"
-]
+
+def _norm(s):
+    """Normalize a school name for fuzzy matching (accent/case/punct-insensitive)."""
+    s = unicodedata.normalize("NFKD", str(s or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    s = re.sub(r"\([^)]*\)", " ", s)          # drop parentheticals e.g. "(MIT)"
+    s = s.replace("&", " and ")
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    s = re.sub(r"^the ", "", s)               # leading "The"
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# norm_key -> (rank, official_name, country). Built once at import.
+_LOOKUP = {}
+# Manual aliases for common abbreviations GPT may emit, mapped to the official name.
+_MANUAL_ALIASES = {
+    "uc berkeley": "University of California, Berkeley",
+    "berkeley": "University of California, Berkeley",
+    "ucla": "University of California, Los Angeles",
+    "uc san diego": "University of California, San Diego",
+    "ucsd": "University of California, San Diego",
+    "oxford": "University of Oxford",
+    "cambridge": "University of Cambridge",
+    "eth": "ETH Zurich",
+    "epfl": "EPFL",
+    "hku": "The University of Hong Kong",
+    "cuhk": "The Chinese University of Hong Kong",
+    "hkust": "The Hong Kong University of Science and Technology",
+    "ntu": "Nanyang Technological University, Singapore",
+    "sjtu": "Shanghai Jiao Tong University",
+    "ust": "The Hong Kong University of Science and Technology",
+}
+
+for _rk, _name, _cty, _alias in QS_TOP500:
+    _LOOKUP.setdefault(_norm(_name), (_rk, _name, _cty))
+    if _alias:
+        _LOOKUP.setdefault(_norm(_alias), (_rk, _name, _cty))
+
+# Resolve manual aliases against the official names already loaded.
+_name_to_rec = {_norm(n): (rk, n, c) for rk, n, c, _ in QS_TOP500}
+for _alias_key, _official in _MANUAL_ALIASES.items():
+    _rec = _name_to_rec.get(_norm(_official))
+    if _rec:
+        _LOOKUP.setdefault(_norm(_alias_key), _rec)
+
+
+def qs_lookup(name):
+    """Return (rank, official_name, country) for a school name, or None if no match."""
+    if not name:
+        return None
+    return _LOOKUP.get(_norm(name))
+
+
+def canonical_school_name(name):
+    """Snap a school name to its official QS string; return input unchanged if unknown."""
+    rec = qs_lookup(name)
+    return rec[1] if rec else str(name or "").strip()
+
+
+def qs_rank_for(name):
+    """Return the QS rank (int) for a school name, or "" if it isn't in the top 500."""
+    rec = qs_lookup(name)
+    return rec[0] if rec else ""
+
+
+def country_for(name):
+    """Return the QS country for a school name, or "" if unknown."""
+    rec = qs_lookup(name)
+    return rec[2] if rec else ""
+
 
 def get_qs_rank(name):
-    name_lower = name.lower().replace("the ", "").strip()
-    
-    # 1. 完全一致
-    for i, qs_name in enumerate(QS_2025_TOP_100):
-        qs_lower = qs_name.lower().strip()
-        if qs_lower == name_lower:
-            return i
-            
-    # 2. 词边界精确匹配 (防止 psl 匹配到 upslal, 避免误伤)
-    for i, qs_name in enumerate(QS_2025_TOP_100):
-        qs_lower = qs_name.lower().strip()
-        
-        # 处理别名
-        if qs_lower == "eth zurich" and ("eth z" in name_lower or "eidgenössische technische hochschule" in name_lower):
-            return i
-        if qs_lower == "ecole polytechnique federale de lausanne" and ("epfl" in name_lower or "fédérale de lausanne" in name_lower):
-            return i
-        if qs_lower == "ludwig-maximilians-universität" and "ludwig-maximilian" in name_lower:
-            return i
-        if qs_lower == "technical university of munich" and ("technische universität münchen" in name_lower or "tum " in name_lower.replace("-", " ")):
-            return i
-        if qs_lower == "kth royal institute of technology" and ("kungliga tekniska" in name_lower or "kth" in name_lower.split()):
-            return i
-        if qs_lower == "kaist" and "korea advanced institute of science" in name_lower:
-            return i
-        if qs_lower == "psl" and ("psl research" in name_lower or "paris-sciences-et-lettres" in name_lower):
-            return i
-        if qs_lower == "postech" and "pohang university" in name_lower:
-            return i
-        if qs_lower == "universiti malaya" and "university of malaya" in name_lower:
-            return i
-            
-        import re
-        if re.search(r'\b' + re.escape(qs_lower) + r'\b', name_lower):
-            # 防止城市大学等包含港大
-            if qs_lower == "university of hong kong" and not name_lower.startswith("university of hong kong"):
-                continue
-            if qs_lower == "university of washington" and "st. louis" in name_lower:
-                continue
-            if qs_lower == "washington university" and "st. louis" not in name_lower:
-                continue
-            if qs_lower == "university of york" and "new york" in name_lower:
-                continue
-                
-            return i
-            
-    return 9999
+    """Backward-compatible 0-based rank (9999 if unranked)."""
+    rec = qs_lookup(name)
+    return (rec[0] - 1) if rec else 9999
 
 
 def get_world_universities():
-    try:
-        url = "https://raw.githubusercontent.com/Hipo/university-domains-list/master/world_universities_and_domains.json"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        
-        country_code_map = {}
-        for item in data:
-            c = item.get("country")
-            code = item.get("alpha_two_code")
-            if c and code and len(code) == 2 and c not in country_code_map:
-                base = 127397
-                u_code = code.upper()
-                if u_code == 'UK': u_code = 'GB'
-                flag = chr(ord(u_code[0]) + base) + chr(ord(u_code[1]) + base)
-                country_code_map[c] = flag
-                
-        country_univ_map = {}
-        for item in data:
-            c = item.get("country")
-            name = item.get("name")
-            if c and name:
-                # 仅保留在 QS 名单内的学校
-                if get_qs_rank(name) < 9999:
-                    flag = country_code_map.get(c, "🏳️")
-                    c_key = f"{flag} {c}"
-                    if c_key not in country_univ_map:
-                        country_univ_map[c_key] = []
-                    country_univ_map[c_key].append(name)
-                
-        for c in country_univ_map:
-            sorted_list = sorted(list(set(country_univ_map[c])), key=lambda x: (get_qs_rank(x), x))
-            formatted_list = []
-            for x in sorted_list:
-                rank = get_qs_rank(x)
-                if rank < 9999:
-                    formatted_list.append(f"{x} (QS 2025 #{rank + 1})")
-                else:
-                    formatted_list.append(x)
-            country_univ_map[c] = formatted_list
-            
-        return country_univ_map
-    except Exception as e:
-        return {"🇺🇸 United States": ["MIT", "Stanford"], "🇬🇧 United Kingdom": ["Cambridge"], "🇨🇳 China": ["Tsinghua"]}
+    """Return {"<flag> <country>": ["Official Name (QS <edition> #rank)", ...]}.
+
+    Grouped by country, sorted by QS rank. The "<flag> <country>" key shape and
+    the "(QS ... #rank)" suffix match what the add/edit dialogs expect.
+    """
+    by_country = {}
+    for rk, name, cty, _alias in QS_TOP500:
+        by_country.setdefault(cty, []).append((rk, name))
+    out = {}
+    for cty, items in by_country.items():
+        items.sort(key=lambda t: (t[0], t[1]))
+        flag = COUNTRY_FLAG.get(cty, "🎓")
+        out[f"{flag} {cty}"] = [f"{name} (QS {QS_EDITION} #{rk})" for rk, name in items]
+    return out
