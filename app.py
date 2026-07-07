@@ -3778,11 +3778,25 @@ def main():
                 cap_l.caption(ui(f"✅ 已自动保存 · 更新于 {sel.get('updated_at', '-')}",
                                  f"✅ Auto-saved · updated {sel.get('updated_at', '-')}"))
                 # 删除按钮在 radio 之后：不能改动已实例化的 tpl_picker，交给下轮规范化重选。
+                # 先弹出确认，再真正删除。
                 if cap_r.button(ui("🗑 删除此模版", "🗑 Delete"), key=f"tpl_del_{sel_id}", use_container_width=True):
-                    remaining = [t2 for t2 in templates if t2["id"] != sel_id]
-                    save_templates(remaining)
-                    st.session_state["tpl_toast"] = ui("已删除模版", "Template deleted")
+                    st.session_state["tpl_delete_id"] = sel_id
                     st.rerun()
+
+                if st.session_state.get("tpl_delete_id") == sel_id:
+                    st.warning(ui(f"确认删除模版「{name_by_id.get(sel_id, '')}」？此操作不可撤销。",
+                                  f"Delete template “{name_by_id.get(sel_id, '')}”? This cannot be undone."))
+                    dc1, dc2 = st.columns(2)
+                    if dc1.button(ui("取消", "Cancel"), key=f"tpl_del_cancel_{sel_id}", use_container_width=True):
+                        st.session_state.pop("tpl_delete_id", None)
+                        st.rerun()
+                    if dc2.button(ui("确认删除", "Confirm delete"), key=f"tpl_del_confirm_{sel_id}",
+                                  type="primary", use_container_width=True):
+                        remaining = [t2 for t2 in templates if t2["id"] != sel_id]
+                        save_templates(remaining)
+                        st.session_state.pop("tpl_delete_id", None)
+                        st.session_state["tpl_toast"] = ui("已删除模版", "Template deleted")
+                        st.rerun()
 
     elif menu == t("menu_interview"):
         st.title(ui("面试准备舱", "Interview Prep"))
