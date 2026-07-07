@@ -4,7 +4,7 @@ import json
 import os
 from copy import deepcopy
 
-from .constants import CONFIG_FILE, DB_FILE, DEFAULT_CONFIG, LITE_EMAILS_FILE
+from .constants import CONFIG_FILE, DB_FILE, DEFAULT_CONFIG, LITE_EMAILS_FILE, TEMPLATES_FILE
 
 
 def _read_json(path, default):
@@ -42,3 +42,13 @@ def load_lite_emails():
 
 def save_lite_emails(data):
     _write_json(LITE_EMAILS_FILE, data, indent=4, ensure_ascii=False)
+
+
+def load_templates():
+    """User-authored cold-email (套瓷信) templates."""
+    data = _read_json(TEMPLATES_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_templates(data):
+    _write_json(TEMPLATES_FILE, data, indent=4, ensure_ascii=False)

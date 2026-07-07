@@ -18,6 +18,7 @@ CONFIG_FILE = _data_path("phdhub_config.json")
 DB_FILE = _data_path("phdhub_db.json")
 EMAILS_CACHE_FILE = _data_path("phdhub_emails_cache.json")
 LITE_EMAILS_FILE = _data_path("phdhub_lite_emails.json")
+TEMPLATES_FILE = _data_path("phdhub_templates.json")
 
 DEFAULT_CONFIG = {
     "email": "",

@@ -13,6 +13,7 @@ phdhub_emails_cache.json
 phdhub_lite_emails.json
 phdhub_resumes.json
 phdhub_rps.json
+phdhub_templates.json
 resumes/
 rps/
 *.log
