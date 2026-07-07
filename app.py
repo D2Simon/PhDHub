@@ -1201,6 +1201,7 @@ def _save_template_cb(tid):
     for tp in tpls:
         if tp.get("id") == tid:
             tp["name"] = st.session_state.get(f"tpl_name_{tid}", tp.get("name", ""))
+            tp["subject"] = st.session_state.get(f"tpl_subject_{tid}", tp.get("subject", ""))
             tp["content"] = st.session_state.get(f"tpl_content_{tid}", tp.get("content", ""))
             tp["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             break
@@ -3722,7 +3723,7 @@ def main():
             while name in existing:
                 name = f"{base} {n}"
                 n += 1
-            templates.append({"id": new_id, "name": name, "content": "", "updated_at": now})
+            templates.append({"id": new_id, "name": name, "subject": "", "content": "", "updated_at": now})
             save_templates(templates)
             st.session_state["tpl_picker"] = new_id
             st.session_state["tpl_toast"] = ui("已新建模版", "Template created")
@@ -3753,9 +3754,12 @@ def main():
             with right:
                 sel = next(t2 for t2 in templates if t2["id"] == sel_id)
                 name_key = f"tpl_name_{sel_id}"
+                subject_key = f"tpl_subject_{sel_id}"
                 content_key = f"tpl_content_{sel_id}"
                 if name_key not in st.session_state:
                     st.session_state[name_key] = sel.get("name", "")
+                if subject_key not in st.session_state:
+                    st.session_state[subject_key] = sel.get("subject", "")
                 if content_key not in st.session_state:
                     st.session_state[content_key] = sel.get("content", "")
 
@@ -3764,6 +3768,14 @@ def main():
                     key=name_key,
                     on_change=_save_template_cb,
                     args=(sel_id,),
+                )
+                st.text_input(
+                    ui("邮件主题", "Email subject"),
+                    key=subject_key,
+                    on_change=_save_template_cb,
+                    args=(sel_id,),
+                    placeholder=ui("套瓷信的邮件标题，例如：Prospective PhD student interested in [研究方向]",
+                                   "Cold-email subject line, e.g. Prospective PhD student interested in [Research area]"),
                 )
                 st.text_area(
                     ui("模版内容", "Template content"),
