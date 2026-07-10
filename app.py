@@ -3601,36 +3601,60 @@ def main():
                 if _no_home:
                     st.warning(ui(f"其中 {len(_no_home)} 位没有主页链接（个人主页 / 学院教职页均未找到）。",
                                   f"{len(_no_home)} of them have no homepage (neither personal nor faculty page)."))
+
+                cselA, cselB = st.columns(2)
+                select_all = cselA.checkbox(ui("全选", "Select all"), value=True, key="db_ai_select_all")
+                only_home = cselB.checkbox(ui("仅选有主页链接的老师", "Only those with a homepage"),
+                                           value=bool(_no_home), key="db_ai_only_home")
+
+                # 每行默认是否勾选：全选 且（不限主页 或 该行有主页）
+                _col_sel = ui("导入", "Import")
+                _col_home = ui("主页", "Homepage")
                 _prev_df = pd.DataFrame([{
+                    _col_sel: bool(select_all and (str(p.get("主页链接", "")).strip() or not only_home)),
                     ui("导师", "Professor"): p.get("导师/教授", ""),
                     ui("学校", "School"): p.get("学校名称", ""),
                     ui("院系", "Dept"): p.get("院系", ""),
                     ui("研究方向", "Research"): p.get("研究方向", ""),
-                    ui("主页", "Homepage"): p.get("主页链接", "") or "—",
+                    _col_home: p.get("主页链接", "") or "—",
                 } for p in _preview])
-                st.dataframe(_prev_df, use_container_width=True, hide_index=True,
-                             column_config={ui("主页", "Homepage"): st.column_config.LinkColumn()})
 
-                only_home = st.checkbox(ui("仅导入有主页链接的老师", "Import only professors with a homepage"),
-                                        value=bool(_no_home), key="db_ai_only_home")
+                # key 随两个开关变化 → 切换全选/仅主页时用新默认值重建编辑器
+                _editor_key = f"db_ai_editor_{int(select_all)}_{int(only_home)}_{len(_preview)}"
+                edited = st.data_editor(
+                    _prev_df, use_container_width=True, hide_index=True, key=_editor_key,
+                    column_config={
+                        _col_sel: st.column_config.CheckboxColumn(_col_sel, help=ui("勾选后导入", "Tick to import")),
+                        _col_home: st.column_config.LinkColumn(),
+                        ui("导师", "Professor"): st.column_config.TextColumn(disabled=True),
+                        ui("学校", "School"): st.column_config.TextColumn(disabled=True),
+                        ui("院系", "Dept"): st.column_config.TextColumn(disabled=True),
+                        ui("研究方向", "Research"): st.column_config.TextColumn(disabled=True),
+                    },
+                )
+                _sel_mask = list(edited[_col_sel]) if _col_sel in edited else [True] * len(_preview)
+                _sel_count = sum(1 for v in _sel_mask if v)
+                st.caption(ui(f"已选择 {_sel_count} / {len(_preview)} 位。",
+                              f"Selected {_sel_count} / {len(_preview)}."))
+
                 cimp1, cimp2 = st.columns(2)
-                if cimp1.button(ui("确认导入到导师库", "Confirm import"), type="primary",
-                                use_container_width=True, key="db_ai_import_confirm"):
-                    to_import = [p for p in _preview if str(p.get("主页链接", "")).strip()] if only_home else list(_preview)
+                if cimp1.button(ui(f"确认导入所选（{_sel_count}）", f"Import selected ({_sel_count})"),
+                                type="primary", use_container_width=True, key="db_ai_import_confirm"):
+                    to_import = [p for p, keep in zip(_preview, _sel_mask) if keep]
                     if not to_import:
-                        st.warning(ui("没有可导入的老师（都缺主页链接）。", "Nothing to import (all lack a homepage)."))
+                        st.warning(ui("请至少勾选一位老师。", "Please select at least one professor."))
                     else:
                         new_db, _ = dedupe_db(load_db() + to_import)
                         save_db(new_db)
-                        st.session_state.pop("db_ai_preview", None)
-                        st.session_state.pop("db_ai_only_home", None)
+                        for _k in ("db_ai_preview", "db_ai_only_home", "db_ai_select_all"):
+                            st.session_state.pop(_k, None)
                         st.session_state["db_bulk_import_toast"] = ui(
                             f"已导入 {len(to_import)} 位，导师库现有 {len(new_db)} 位。",
                             f"Imported {len(to_import)}; DB now has {len(new_db)} professors.")
                         st.rerun()
                 if cimp2.button(ui("放弃这批结果", "Discard"), use_container_width=True, key="db_ai_import_discard"):
-                    st.session_state.pop("db_ai_preview", None)
-                    st.session_state.pop("db_ai_only_home", None)
+                    for _k in ("db_ai_preview", "db_ai_only_home", "db_ai_select_all"):
+                        st.session_state.pop(_k, None)
                     st.rerun()
 
             st.divider()

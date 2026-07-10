@@ -20,6 +20,43 @@ def _claude_base_url(config):
     return url or _CLAUDE_DEFAULT_BASE_URL
 
 
+def _extract_text_from_response(data):
+    """从各种中转站响应结构里稳健取出文本（兼容 Anthropic / OpenAI / 变体）。"""
+    if not isinstance(data, dict):
+        return ""
+    # 1) Anthropic 原生：{"content":[{"type":"text","text":"..."}]}
+    parts = data.get("content")
+    if isinstance(parts, list):
+        text = "".join(
+            p.get("text", "") for p in parts
+            if isinstance(p, dict) and (p.get("type") in (None, "text")) and p.get("text")
+        )
+        if text:
+            return text
+    # 2) content 直接是字符串
+    if isinstance(parts, str) and parts.strip():
+        return parts
+    # 3) OpenAI 兼容：{"choices":[{"message":{"content":"..."}}]} 或 {"text":...}
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        ch0 = choices[0] if isinstance(choices[0], dict) else {}
+        msg = ch0.get("message") if isinstance(ch0.get("message"), dict) else {}
+        for cand in (msg.get("content"), ch0.get("text"), ch0.get("content")):
+            if isinstance(cand, str) and cand.strip():
+                return cand
+            # 有的把 content 也做成分块数组
+            if isinstance(cand, list):
+                t = "".join(x.get("text", "") for x in cand if isinstance(x, dict))
+                if t.strip():
+                    return t
+    # 4) 其他常见字段兜底
+    for key in ("output_text", "text", "message"):
+        v = data.get(key)
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
 def _call_claude_native(prompt, api_key, base, model, temperature, max_tokens, prefill=""):
     """走 Anthropic 原生协议 /v1/messages（对应 CC 的 ANTHROPIC_BASE_URL）。
 
@@ -29,31 +66,55 @@ def _call_claude_native(prompt, api_key, base, model, temperature, max_tokens, p
     messages = [{"role": "user", "content": prompt}]
     if prefill:
         messages.append({"role": "assistant", "content": prefill})
-    body = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": messages,
-    }).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("x-api-key", api_key)
-    req.add_header("Authorization", f"Bearer {api_key}")  # 部分中转站认这个头
-    req.add_header("anthropic-version", "2023-06-01")
-    try:
+
+    def _do_request(disable_thinking):
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": messages,
+        }
+        if disable_thinking:
+            # 关闭扩展思考：否则 thinking 会吃掉 max_tokens，正式 text 输出被挤空/截断
+            payload["thinking"] = {"type": "disabled"}
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("x-api-key", api_key)
+        req.add_header("Authorization", f"Bearer {api_key}")  # 部分中转站认这个头
+        req.add_header("anthropic-version", "2023-06-01")
         with urllib.request.urlopen(req, timeout=180) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return resp.read().decode("utf-8", "ignore")
+
+    try:
+        raw = _do_request(disable_thinking=True)
     except urllib.error.HTTPError as e:
-        # 把中转站返回的错误正文带出来，便于定位（否则只剩一句 400 Bad Request）
-        try:
-            detail = e.read().decode("utf-8", "ignore")[:300]
-        except Exception:
-            detail = ""
-        raise RuntimeError(f"HTTP {e.code} {detail}".strip()) from None
-    # 标准响应：{"content":[{"type":"text","text":"..."}], ...}
-    parts = data.get("content", []) if isinstance(data, dict) else []
-    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
-    # 预填的开头不会包含在响应里，需要拼回去
+        # 某些中转站不认 thinking 参数 → 400，去掉该参数重试一次
+        if e.code == 400:
+            try:
+                raw = _do_request(disable_thinking=False)
+            except urllib.error.HTTPError as e2:
+                try:
+                    detail = e2.read().decode("utf-8", "ignore")[:300]
+                except Exception:
+                    detail = ""
+                raise RuntimeError(f"HTTP {e2.code} {detail}".strip()) from None
+        else:
+            try:
+                detail = e.read().decode("utf-8", "ignore")[:300]
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"HTTP {e.code} {detail}".strip()) from None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # 不是 JSON：可能中转站直接吐了纯文本
+        text = raw.strip()
+        if text:
+            return (prefill + text).strip() if prefill else text
+        raise RuntimeError("空响应（非 JSON）") from None
+    text = _extract_text_from_response(data)
+    if not text:
+        raise RuntimeError(f"空响应；原始返回片段：{raw.strip()[:300]}") from None
     return (prefill + text).strip() if prefill else text.strip()
 
 
@@ -112,6 +173,7 @@ def _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
@@ -147,11 +209,20 @@ def _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
             if delta:
                 got_any = True
                 yield delta
-        elif etype == "message_stop":
+            continue
+        if etype in ("message_stop",):
             break
-        elif etype == "error":
+        if etype == "error":
             msg = (evt.get("error") or {}).get("message", "stream error")
             raise RuntimeError(msg)
+        # OpenAI 兼容流：{"choices":[{"delta":{"content":"..."}}]}
+        choices = evt.get("choices")
+        if isinstance(choices, list) and choices:
+            ch0 = choices[0] if isinstance(choices[0], dict) else {}
+            delta = (ch0.get("delta") or {}).get("content", "") or ""
+            if delta:
+                got_any = True
+                yield delta
     if not got_any:
         raise RuntimeError("流式无内容（中转站可能不支持 stream）")
 
