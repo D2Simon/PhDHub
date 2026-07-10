@@ -4,7 +4,14 @@ import json
 import os
 from copy import deepcopy
 
-from .constants import CONFIG_FILE, DB_FILE, DEFAULT_CONFIG, LITE_EMAILS_FILE, TEMPLATES_FILE
+from .constants import (
+    CONFIG_FILE,
+    DB_FILE,
+    DEFAULT_CONFIG,
+    INTERVIEW_REVIEWS_FILE,
+    LITE_EMAILS_FILE,
+    TEMPLATES_FILE,
+)
 
 
 def _read_json(path, default):
@@ -52,3 +59,13 @@ def load_templates():
 
 def save_templates(data):
     _write_json(TEMPLATES_FILE, data, indent=4, ensure_ascii=False)
+
+
+def load_interview_reviews():
+    """Post-interview review records (one per interview)."""
+    data = _read_json(INTERVIEW_REVIEWS_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_interview_reviews(data):
+    _write_json(INTERVIEW_REVIEWS_FILE, data, indent=4, ensure_ascii=False)

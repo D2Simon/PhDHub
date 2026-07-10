@@ -50,10 +50,12 @@ from phdhub.stats import get_email_stats_from_emails, get_recent_7d_email_stats_
 from phdhub.storage import (
     load_config,
     load_db,
+    load_interview_reviews,
     load_lite_emails,
     load_templates,
     save_config,
     save_db,
+    save_interview_reviews,
     save_lite_emails,
     save_templates,
 )
@@ -1707,6 +1709,7 @@ def main():
         lite_email_label = ui("邮件记录", "Email Records")
         data_mgmt_label = ui("资料管理", "Data Management")
         templates_menu_label = ui("套瓷信模版", "Cold-Email Templates")
+        review_menu_label = ui("面试回顾", "Interview Review")
 
         # 用稳定的页面 id 作为导航选项，切换语言时保持当前页面不变
         label_map = {
@@ -1717,13 +1720,14 @@ def main():
             "db": t("menu_db"),
             "templates": templates_menu_label,
             "interview": t("menu_interview"),
+            "review": review_menu_label,
             "settings": settings_menu_label,
             "data": data_mgmt_label,
         }
         if lite_mode:
-            page_ids = ["dashboard", "email", "db", "templates", "data"]
+            page_ids = ["dashboard", "email", "db", "templates", "review", "data"]
         else:
-            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "settings"]
+            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "settings"]
 
         # 清理早期版本可能残留的旧导航 key（其值可能是标签而非页面 id）
         for _stale in ("nav_radio_lite", "nav_radio_full"):
@@ -3435,21 +3439,21 @@ def main():
         st.title(ui("导师库管理", "Professor DB"))
         _edit_toast = st.session_state.pop("db_edit_toast", None)
         if _edit_toast:
-            st.toast(_edit_toast, icon="✅")
+            st.toast(_edit_toast)
         st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>{ui('此处聚合所有导师：既有已套瓷的，也可以是还没套瓷、仅作为目标登记的。', 'All professors live here — both contacted ones and not-yet-contacted targets.')}</p>", unsafe_allow_html=True)
 
         top_l, top_r = st.columns([3, 1])
         with top_l:
-            bulk_mode = st.toggle(ui("🗑 批量删除模式", "🗑 Bulk delete mode"), key="db_bulk_mode")
+            bulk_mode = st.toggle(ui("批量删除模式", "Bulk delete mode"), key="db_bulk_mode")
         with top_r:
             if st.button(ui("＋ 新建导师", "＋ Add professor"), type="primary", use_container_width=True, key="db_open_add"):
                 add_professor_dialog()
 
         _bulk_toast = st.session_state.pop("db_bulk_import_toast", None)
         if _bulk_toast:
-            st.toast(_bulk_toast, icon="✅")
+            st.toast(_bulk_toast)
 
-        with st.expander(ui("📥 批量导入导师（用 GPT 生成文件）", "📥 Bulk-import professors (generate the file with GPT)"), expanded=False):
+        with st.expander(ui("批量导入导师（用 GPT 生成文件）", "Bulk-import professors (generate the file with GPT)"), expanded=False):
             st.markdown(ui(
                 "**第 1 步**：填写你的需求 → 点「生成并下载提示词」。\n\n"
                 "**第 2 步**：把下载的内容整段贴给 ChatGPT（建议用带代码解释器的模型，如 GPT‑5 Thinking）。它会把结果存成文件并给你一个 `.json` **下载链接**，点链接下载即可——无需手动复制粘贴。\n\n"
@@ -3481,7 +3485,7 @@ def main():
 
             prompt_text = build_import_prompt(req_dir, req_region, req_count, req_extra)
             if st.download_button(
-                ui("⬇ 生成并下载提示词", "⬇ Generate & download prompt"),
+                ui("生成并下载提示词", "Generate & download prompt"),
                 data=prompt_text.encode("utf-8"),
                 file_name="导师库导入_GPT提示词.md",
                 mime="text/markdown",
@@ -3494,7 +3498,7 @@ def main():
                 _cfg["import_tpl_reqs"] = {"dir": req_dir, "region": req_region,
                                           "count": req_count, "extra": req_extra}
                 save_config(_cfg)
-            st.caption(ui("✓ 你填写的需求会自动记住，下次打开仍在。", "✓ Your inputs are remembered for next time."))
+            st.caption(ui("你填写的需求会自动记住，下次打开仍在。", "Your inputs are remembered for next time."))
             with st.popover(ui("预览提示词", "Preview prompt"), use_container_width=True):
                 st.code(prompt_text, language="markdown")
 
@@ -3607,7 +3611,7 @@ def main():
                         st.session_state[f"db_sel_{vi}"] = False
                     st.rerun()
                 if selected_idxs:
-                    if bc3.button(ui(f"🗑 删除选中（{len(selected_idxs)}）", f"🗑 Delete selected ({len(selected_idxs)})"),
+                    if bc3.button(ui(f"删除选中（{len(selected_idxs)}）", f"Delete selected ({len(selected_idxs)})"),
                                   key="db_bulk_delete_btn", type="primary", use_container_width=True):
                         bulk_delete_dialog(list(selected_idxs))
                 else:
@@ -3657,7 +3661,7 @@ def main():
                                 st.markdown(
                                     f"<div style='margin:.35rem 0;padding:.45rem .6rem;border-left:3px solid #60a5fa;"
                                     f"background:rgba(96,165,250,.10);border-radius:6px;font-size:13px;color:#bfdbfe;"
-                                    f"white-space:pre-wrap;'>🤖 <b>LLM Summary</b> · {html.escape(llm_val)}</div>",
+                                    f"white-space:pre-wrap;'><b>LLM Summary</b> · {html.escape(llm_val)}</div>",
                                     unsafe_allow_html=True,
                                 )
 
@@ -3666,12 +3670,12 @@ def main():
                                 st.markdown(
                                     f"<div style='margin:.35rem 0;padding:.45rem .6rem;border-left:3px solid #a78bfa;"
                                     f"background:rgba(167,139,250,.10);border-radius:6px;font-size:13px;color:#d6cffb;"
-                                    f"white-space:pre-wrap;'>📝 {html.escape(note_val)}</div>",
+                                    f"white-space:pre-wrap;'>{html.escape(note_val)}</div>",
                                     unsafe_allow_html=True,
                                 )
 
                             edit_col, del_col = st.columns(2)
-                            if edit_col.button(ui("✏️ 编辑", "✏️ Edit"), key=f"db_edit_btn_{real_idx}", use_container_width=True):
+                            if edit_col.button(ui("编辑", "Edit"), key=f"db_edit_btn_{real_idx}", use_container_width=True):
                                 for _sk in [kk for kk in st.session_state if str(kk).startswith(f"edit_{real_idx}_")]:
                                     st.session_state.pop(_sk, None)
                                 edit_professor_dialog(real_idx)
@@ -4027,6 +4031,158 @@ def main():
             else:
                 for rec in unscheduled_records:
                     render_interview_item(rec.get("idx"), rec.get("row", {}))
+
+    elif menu == review_menu_label:
+        st.title(ui("面试回顾", "Interview Review"))
+        st.markdown(
+            f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>"
+            f"{ui('以一场面试为单位，记录面试老师（从导师库选择）、面试学校与面试内容，方便复盘。', 'Log each interview as a unit — the interviewer (picked from your Professor DB), the school, and what was asked — for later review.')}"
+            f"</p>",
+            unsafe_allow_html=True,
+        )
+
+        reviews = load_interview_reviews()
+        review_db = load_db()
+
+        _rv_toast = st.session_state.pop("rv_toast", None)
+        if _rv_toast:
+            st.toast(_rv_toast, icon="✅")
+
+        MANUAL_PROF = "__manual__"
+
+        # ==== 新建一场面试回顾 ====
+        with st.expander(ui("＋ 新建面试回顾", "＋ New interview review"), expanded=not reviews):
+            if not review_db:
+                st.warning(ui("导师库为空，请先到『导师库管理』添加老师；也可在下方手动填写面试老师姓名。",
+                              "Professor DB is empty — add someone on the Professor DB page, or type the interviewer's name manually below."))
+
+            prof_opts = {MANUAL_PROF: ui("手动输入老师", "Type manually")}
+            for i, r in enumerate(review_db):
+                label = f"{r.get('导师/教授', '?')} · {r.get('学校名称', '?')}"
+                prof_opts[i] = label
+
+            sel_prof = st.selectbox(
+                ui("面试老师（从导师库选择）", "Interviewer (pick from Professor DB)"),
+                list(prof_opts.keys()),
+                format_func=lambda k: prof_opts[k],
+                key="rv_new_prof",
+            )
+
+            if sel_prof == MANUAL_PROF:
+                new_prof_name = st.text_input(ui("面试老师姓名", "Interviewer name"), key="rv_new_prof_manual").strip()
+                default_univ = ""
+            else:
+                new_prof_name = str(review_db[sel_prof].get("导师/教授", "")).strip()
+                default_univ = str(review_db[sel_prof].get("学校名称", "")).strip()
+
+            rc1, rc2 = st.columns([2, 1])
+            with rc1:
+                new_univ = st.text_input(ui("面试学校", "Interview school"),
+                                         value=default_univ, key=f"rv_new_univ_{sel_prof}")
+            with rc2:
+                new_date = st.date_input(ui("面试日期", "Interview date"),
+                                         value=datetime.now().date(), key="rv_new_date")
+
+            new_content = st.text_area(
+                ui("面试内容", "Interview content"),
+                key="rv_new_content", height=200,
+                placeholder=ui("记录面试考察的问题、你的回答、老师的反馈、整体感受等……",
+                               "Record the questions asked, your answers, the interviewer's feedback, overall impression…"),
+            )
+
+            if st.button(ui("保存面试回顾", "Save review"), type="primary", key="rv_new_save"):
+                if not new_prof_name:
+                    st.error(ui("请填写面试老师姓名。", "Please provide the interviewer's name."))
+                elif not str(new_content).strip():
+                    st.error(ui("请填写面试内容。", "Please fill in the interview content."))
+                else:
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reviews.append({
+                        "id": uuid.uuid4().hex,
+                        "prof_name": new_prof_name,
+                        "univ_name": str(new_univ).strip(),
+                        "interview_date": new_date.strftime("%Y-%m-%d"),
+                        "content": str(new_content).strip(),
+                        "created_at": now,
+                        "updated_at": now,
+                    })
+                    save_interview_reviews(reviews)
+                    for _k in ("rv_new_content", "rv_new_prof_manual"):
+                        st.session_state.pop(_k, None)
+                    st.session_state["rv_toast"] = ui("已保存面试回顾", "Review saved")
+                    st.rerun()
+
+        # ==== 已有的面试回顾列表 ====
+        if not reviews:
+            st.info(ui("还没有面试回顾。用上方『＋ 新建面试回顾』记录你的第一场面试。",
+                       "No reviews yet. Use '＋ New interview review' above to log your first interview."))
+        else:
+            st.markdown(f"### {ui('我的面试回顾', 'My interview reviews')} · {len(reviews)}")
+            ordered = sorted(reviews, key=lambda x: str(x.get("interview_date", "")), reverse=True)
+            prof_name_by_key = {i: f"{r.get('导师/教授', '?')} · {r.get('学校名称', '?')}" for i, r in enumerate(review_db)}
+
+            for rv in ordered:
+                rid = rv.get("id")
+                title_bits = [rv.get("prof_name", "") or ui("未知老师", "Unknown"),
+                              rv.get("univ_name", "") or ui("未知学校", "Unknown school")]
+                if rv.get("interview_date"):
+                    title_bits.append(rv["interview_date"])
+                with st.expander(" | ".join(title_bits), expanded=False):
+                    name_k = f"rv_name_{rid}"
+                    univ_k = f"rv_univ_{rid}"
+                    content_k = f"rv_content_{rid}"
+                    if name_k not in st.session_state:
+                        st.session_state[name_k] = rv.get("prof_name", "")
+                    if univ_k not in st.session_state:
+                        st.session_state[univ_k] = rv.get("univ_name", "")
+                    if content_k not in st.session_state:
+                        st.session_state[content_k] = rv.get("content", "")
+
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        st.text_input(ui("面试老师", "Interviewer"), key=name_k)
+                    with ec2:
+                        st.text_input(ui("面试学校", "Interview school"), key=univ_k)
+                    st.text_area(ui("面试内容", "Interview content"), key=content_k, height=200)
+
+                    st.caption(ui(f"创建于 {rv.get('created_at', '-')} · 更新于 {rv.get('updated_at', '-')}",
+                                  f"Created {rv.get('created_at', '-')} · updated {rv.get('updated_at', '-')}"))
+
+                    sc1, sc2 = st.columns([1, 1])
+                    if sc1.button(ui("💾 保存修改", "💾 Save changes"), key=f"rv_save_{rid}",
+                                  type="primary", use_container_width=True):
+                        cur = load_interview_reviews()
+                        for item in cur:
+                            if item.get("id") == rid:
+                                item["prof_name"] = st.session_state.get(name_k, "").strip()
+                                item["univ_name"] = st.session_state.get(univ_k, "").strip()
+                                item["content"] = st.session_state.get(content_k, "").strip()
+                                item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                break
+                        save_interview_reviews(cur)
+                        st.session_state["rv_toast"] = ui("已保存修改", "Changes saved")
+                        st.rerun()
+
+                    if sc2.button(ui("🗑 删除", "🗑 Delete"), key=f"rv_del_{rid}", use_container_width=True):
+                        st.session_state["rv_delete_id"] = rid
+                        st.rerun()
+
+                    if st.session_state.get("rv_delete_id") == rid:
+                        st.warning(ui("确认删除这场面试回顾？此操作不可撤销。",
+                                      "Delete this interview review? This cannot be undone."))
+                        dc1, dc2 = st.columns(2)
+                        if dc1.button(ui("取消", "Cancel"), key=f"rv_del_cancel_{rid}", use_container_width=True):
+                            st.session_state.pop("rv_delete_id", None)
+                            st.rerun()
+                        if dc2.button(ui("确认删除", "Confirm delete"), key=f"rv_del_confirm_{rid}",
+                                      type="primary", use_container_width=True):
+                            remaining = [x for x in load_interview_reviews() if x.get("id") != rid]
+                            save_interview_reviews(remaining)
+                            for _k in (name_k, univ_k, content_k):
+                                st.session_state.pop(_k, None)
+                            st.session_state.pop("rv_delete_id", None)
+                            st.session_state["rv_toast"] = ui("已删除面试回顾", "Review deleted")
+                            st.rerun()
 
     elif menu == settings_menu_label:
         st.title(settings_menu_label)
