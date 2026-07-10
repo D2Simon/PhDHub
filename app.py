@@ -20,9 +20,13 @@ from phdhub.ai_services import (
     generate_high_frequency_answer,
     generate_mock_interview_turn,
     generate_interview_advice,
+    generate_professor_list,
+    parse_professor_payload,
+    stream_professor_list,
     generate_resume_analysis,
     generate_rp_analysis,
     generate_interview_questions,
+    test_claude_connection,
     verify_professor_homepage,
 )
 from phdhub.constants import EMAILS_CACHE_FILE
@@ -440,6 +444,12 @@ def _save_ai_settings_from_state():
         config["qwen_api_key"] = st.session_state.get("settings_qwen_api_key", "")
     if "settings_gemini_api_key" in st.session_state:
         config["gemini_api_key"] = st.session_state.get("settings_gemini_api_key", "")
+    if "settings_claude_api_key" in st.session_state:
+        config["claude_api_key"] = st.session_state.get("settings_claude_api_key", "")
+    if "settings_claude_base_url" in st.session_state:
+        config["claude_base_url"] = st.session_state.get("settings_claude_base_url", "")
+    if "settings_claude_model" in st.session_state:
+        config["claude_model"] = st.session_state.get("settings_claude_model", "")
     save_config(config)
 
 
@@ -1725,7 +1735,7 @@ def main():
             "data": data_mgmt_label,
         }
         if lite_mode:
-            page_ids = ["dashboard", "email", "db", "templates", "review", "data"]
+            page_ids = ["dashboard", "email", "db", "templates", "review", "settings", "data"]
         else:
             page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "settings"]
 
@@ -3502,8 +3512,129 @@ def main():
             with st.popover(ui("预览提示词", "Preview prompt"), use_container_width=True):
                 st.code(prompt_text, language="markdown")
 
+            # ② 直接用 AI 生成（免去下载提示词→喂 GPT→再上传的手动流程）
             st.divider()
-            st.markdown(f"**{ui('② 上传 GPT 生成的 JSON', '② Upload the JSON from GPT')}**")
+            st.markdown(f"**{ui('② 直接用 AI 生成（推荐）', '② Generate with AI directly (recommended)')}**")
+            _gen_provider = load_config().get("ai_provider", "通义千问 (Qwen)")
+            st.caption(ui(f"将用当前引擎「{_gen_provider}」检索并列出老师，你确认后再导入（每位老师都会附个人主页或学院教职页）。可在【系统配置】切换引擎。",
+                          f"Uses the current engine ‘{_gen_provider}’ to search and list professors; you confirm before importing (each comes with a personal or faculty page). Switch engines in System Config."))
+            if st.button(ui("用 AI 生成导师名单", "Generate professors with AI"),
+                         type="primary", use_container_width=True, key="db_ai_gen_btn"):
+                # 记住需求
+                _cfg = load_config()
+                _cfg["import_tpl_reqs"] = {"dir": req_dir, "region": req_region,
+                                          "count": req_count, "extra": req_extra}
+                save_config(_cfg)
+                if not str(req_dir).strip() and not str(req_region).strip():
+                    st.warning(ui("请至少填写「研究方向」或「地区 / 目标学校」。",
+                                  "Please fill in at least Research area or Region / target schools."))
+                else:
+                    ai_cfg = _ai_cfg_with_app_lang(load_config())
+
+                    def _finalize_gen(profs):
+                        """归一化学校名 / QS / 国家 / 来源，写入预览。"""
+                        for p in profs:
+                            canon = canonical_school_name(str(p.get("学校名称", "")).strip())
+                            p["学校名称"] = canon
+                            p["QS排名"] = qs_rank_for(canon)
+                            _qs_country = country_for(canon)
+                            if _qs_country:
+                                p["国家/地区"] = _qs_country
+                            elif not str(p.get("国家/地区", "")).strip():
+                                p["国家/地区"] = "未知"
+                            p["来源"] = "AI 生成"
+                        st.session_state["db_ai_preview"] = profs
+
+                    provider_now = ai_cfg.get("ai_provider", "通义千问 (Qwen)")
+                    gen_ok, gen_profs, gen_err = False, [], ""
+
+                    if provider_now == "Claude (中转)":
+                        # 流式：实时显示模型正在产出的内容 + 已找到的老师数
+                        status_ph = st.empty()
+                        count_ph = st.empty()
+                        text_ph = st.empty()
+                        acc_text, last_count = "", 0
+                        try:
+                            status_ph.info(ui("AI 正在检索并实时输出……", "AI is searching and streaming…"))
+                            for kind, payload, n in stream_professor_list(
+                                    req_dir, req_region, req_count, req_extra, ai_cfg):
+                                if kind == "chunk":
+                                    acc_text = payload
+                                    if n != last_count:
+                                        last_count = n
+                                        count_ph.caption(ui(f"已找到约 {n} 位老师…", f"~{n} professors so far…"))
+                                    # 只展示尾部，避免刷屏
+                                    tail = acc_text[-1500:]
+                                    text_ph.code(tail, language="json")
+                                elif kind == "done":
+                                    gen_ok, gen_profs, gen_err = parse_professor_payload(payload)
+                                elif kind == "error":
+                                    gen_err = payload
+                            status_ph.empty(); count_ph.empty(); text_ph.empty()
+                        except Exception as e:
+                            gen_err = f"{e}"
+                        # 流式失败 → 回退非流式
+                        if not gen_ok:
+                            with st.spinner(ui("流式不可用，改用普通方式生成……",
+                                               "Streaming unavailable, falling back…")):
+                                gen_ok, gen_profs, gen_err = generate_professor_list(
+                                    req_dir, req_region, req_count, req_extra, ai_cfg)
+                    else:
+                        with st.spinner(ui("AI 正在检索并整理导师名单，可能需要 10-60 秒……",
+                                           "AI is compiling the professor list, this may take 10-60s…")):
+                            gen_ok, gen_profs, gen_err = generate_professor_list(
+                                req_dir, req_region, req_count, req_extra, ai_cfg)
+
+                    if not gen_ok:
+                        st.session_state.pop("db_ai_preview", None)
+                        st.error(ui(f"生成失败：{gen_err}", f"Generation failed: {gen_err}"))
+                    else:
+                        _finalize_gen(gen_profs)
+                        st.rerun()
+
+            # 生成结果预览 + 确认导入
+            _preview = st.session_state.get("db_ai_preview")
+            if _preview:
+                _no_home = [p for p in _preview if not str(p.get("主页链接", "")).strip()]
+                st.success(ui(f"AI 共找到 {len(_preview)} 位老师，请确认后再导入。",
+                              f"AI found {len(_preview)} professors. Review before importing."))
+                if _no_home:
+                    st.warning(ui(f"其中 {len(_no_home)} 位没有主页链接（个人主页 / 学院教职页均未找到）。",
+                                  f"{len(_no_home)} of them have no homepage (neither personal nor faculty page)."))
+                _prev_df = pd.DataFrame([{
+                    ui("导师", "Professor"): p.get("导师/教授", ""),
+                    ui("学校", "School"): p.get("学校名称", ""),
+                    ui("院系", "Dept"): p.get("院系", ""),
+                    ui("研究方向", "Research"): p.get("研究方向", ""),
+                    ui("主页", "Homepage"): p.get("主页链接", "") or "—",
+                } for p in _preview])
+                st.dataframe(_prev_df, use_container_width=True, hide_index=True,
+                             column_config={ui("主页", "Homepage"): st.column_config.LinkColumn()})
+
+                only_home = st.checkbox(ui("仅导入有主页链接的老师", "Import only professors with a homepage"),
+                                        value=bool(_no_home), key="db_ai_only_home")
+                cimp1, cimp2 = st.columns(2)
+                if cimp1.button(ui("确认导入到导师库", "Confirm import"), type="primary",
+                                use_container_width=True, key="db_ai_import_confirm"):
+                    to_import = [p for p in _preview if str(p.get("主页链接", "")).strip()] if only_home else list(_preview)
+                    if not to_import:
+                        st.warning(ui("没有可导入的老师（都缺主页链接）。", "Nothing to import (all lack a homepage)."))
+                    else:
+                        new_db, _ = dedupe_db(load_db() + to_import)
+                        save_db(new_db)
+                        st.session_state.pop("db_ai_preview", None)
+                        st.session_state.pop("db_ai_only_home", None)
+                        st.session_state["db_bulk_import_toast"] = ui(
+                            f"已导入 {len(to_import)} 位，导师库现有 {len(new_db)} 位。",
+                            f"Imported {len(to_import)}; DB now has {len(new_db)} professors.")
+                        st.rerun()
+                if cimp2.button(ui("放弃这批结果", "Discard"), use_container_width=True, key="db_ai_import_discard"):
+                    st.session_state.pop("db_ai_preview", None)
+                    st.session_state.pop("db_ai_only_home", None)
+                    st.rerun()
+
+            st.divider()
+            st.markdown(f"**{ui('③ 或：上传 GPT 生成的 JSON', '③ Or: upload the JSON from GPT')}**")
             db_up = st.file_uploader(ui("上传导师 JSON 文件", "Upload professor JSON file"), type=["json"], key="db_import_file")
             st.caption(ui("导入方式：合并导入（保留现有，按姓名+学校自动去重）。",
                           "Import mode: merge — keeps existing records, de-duplicated by name + school."))
@@ -4187,11 +4318,13 @@ def main():
     elif menu == settings_menu_label:
         st.title(settings_menu_label)
         st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 2rem;'>{ui('配置你的邮箱与系统连接参数，数据仅保存在本地文件中。', 'Configure email and system connection settings. Data is stored locally only.')}</p>", unsafe_allow_html=True)
-        
+
         config = load_config()
-        
-        st.subheader(ui("邮箱账号绑定", "Email Account Binding"))
-        st.info(ui("""**常用邮箱配置指南：**
+
+        # Lite 模式关闭邮箱功能，这里只保留 AI 模型配置；Full 模式才显示邮箱绑定。
+        if not lite_mode:
+            st.subheader(ui("邮箱账号绑定", "Email Account Binding"))
+            st.info(ui("""**常用邮箱配置指南：**
 - **Gmail**: IMAP 为 `imap.gmail.com`，SMTP 为 `smtp.gmail.com`。(密码须用 [应用专用密码](https://myaccount.google.com/apppasswords))
 - **个人版 Outlook/Hotmail**: IMAP 为 `outlook.office365.com`。(需生成 [个人应用密码](https://account.live.com/proofs/manage/additional))
 - **大学/机构邮箱 (如 connect.polyu.hk)**: 
@@ -4208,36 +4341,39 @@ def main():
   - **Password setup**: For org accounts, visit [https://mysignins.microsoft.com/security-info](https://mysignins.microsoft.com/security-info) and add an App Password.
   - **If IMAP is rejected**: Your institution may disable basic auth. A practical fallback is auto-forwarding to Gmail and binding Gmail here.
 """))
-        
-        with st.form("email_config_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                email = st.text_input(ui("邮箱地址", "Email Address"), value=config.get("email", ""))
-                imap_server = st.text_input(ui("IMAP 服务器 (收件)", "IMAP Server (Inbox)"), value=config.get("imap_server", "imap.gmail.com"))
-            with col2:
-                password = st.text_input(ui("应用密码 (App Password)", "App Password"), value=config.get("password", ""), type="password")
-                smtp_server = st.text_input(ui("SMTP 服务器 (发件)", "SMTP Server (Outbox)"), value=config.get("smtp_server", "smtp.gmail.com"))
-            submit_btn = st.form_submit_button(ui("保存邮箱配置", "Save Email Config"))
-            
-        if submit_btn:
-            if email and password:
-                config["email"] = email
-                config["password"] = password
-                config["imap_server"] = imap_server
-                config["smtp_server"] = smtp_server
-            save_config(config)
-            st.success(ui("邮箱及网络配置已成功保存！配置将持久化保留在本地。", "Email and network settings saved locally."))
+
+            with st.form("email_config_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    email = st.text_input(ui("邮箱地址", "Email Address"), value=config.get("email", ""))
+                    imap_server = st.text_input(ui("IMAP 服务器 (收件)", "IMAP Server (Inbox)"), value=config.get("imap_server", "imap.gmail.com"))
+                with col2:
+                    password = st.text_input(ui("应用密码 (App Password)", "App Password"), value=config.get("password", ""), type="password")
+                    smtp_server = st.text_input(ui("SMTP 服务器 (发件)", "SMTP Server (Outbox)"), value=config.get("smtp_server", "smtp.gmail.com"))
+                submit_btn = st.form_submit_button(ui("保存邮箱配置", "Save Email Config"))
+
+            if submit_btn:
+                if email and password:
+                    config["email"] = email
+                    config["password"] = password
+                    config["imap_server"] = imap_server
+                    config["smtp_server"] = smtp_server
+                save_config(config)
+                st.success(ui("邮箱及网络配置已成功保存！配置将持久化保留在本地。", "Email and network settings saved locally."))
 
         st.subheader(ui("AI 模型配置", "AI Model Config"))
+        _ai_providers = ["通义千问 (Qwen)", "Google Gemini", "Claude (中转)"]
+        _cur_provider = config.get("ai_provider", "通义千问 (Qwen)")
         ai_provider = st.selectbox(
             ui("选择 AI 分析引擎", "Select AI Engine"),
-            ["通义千问 (Qwen)", "Google Gemini"],
-            index=0 if config.get("ai_provider", "通义千问 (Qwen)") == "通义千问 (Qwen)" else 1,
+            _ai_providers,
+            index=_ai_providers.index(_cur_provider) if _cur_provider in _ai_providers else 0,
             key="settings_ai_provider",
             on_change=_save_ai_settings_from_state,
         )
         qwen_api_key_stored = st.session_state.get("settings_qwen_api_key", config.get("qwen_api_key", ""))
         gemini_api_key_stored = st.session_state.get("settings_gemini_api_key", config.get("gemini_api_key", ""))
+        claude_api_key_stored = st.session_state.get("settings_claude_api_key", config.get("claude_api_key", ""))
         if ai_provider == "通义千问 (Qwen)":
             st.text_input(
                 ui("通义千问 API Key (sk-...)", "Qwen API Key (sk-...)"),
@@ -4246,7 +4382,7 @@ def main():
                 key="settings_qwen_api_key",
                 on_change=_save_ai_settings_from_state,
             )
-        else:
+        elif ai_provider == "Google Gemini":
             st.text_input(
                 "Gemini API Key (AIzaSy...)",
                 type="password",
@@ -4254,20 +4390,49 @@ def main():
                 key="settings_gemini_api_key",
                 on_change=_save_ai_settings_from_state,
             )
+        else:  # Claude (中转)
+            st.caption(ui("通过 Anthropic 兼容中转站调用 Claude（如 capi.aerolink.lat），无需科学上网。",
+                          "Call Claude via an Anthropic-compatible relay (e.g. capi.aerolink.lat)."))
+            st.text_input(
+                ui("Claude API Key", "Claude API Key"),
+                type="password",
+                value=claude_api_key_stored,
+                key="settings_claude_api_key",
+                on_change=_save_ai_settings_from_state,
+            )
+            st.text_input(
+                ui("中转地址 (Base URL)", "Relay Base URL"),
+                value=st.session_state.get("settings_claude_base_url", config.get("claude_base_url", "https://capi.aerolink.lat/")),
+                key="settings_claude_base_url",
+                on_change=_save_ai_settings_from_state,
+                placeholder="https://capi.aerolink.lat/",
+            )
+            st.text_input(
+                ui("模型名", "Model"),
+                value=st.session_state.get("settings_claude_model", config.get("claude_model", "claude-opus-4-8")),
+                key="settings_claude_model",
+                on_change=_save_ai_settings_from_state,
+                placeholder="claude-opus-4-8",
+            )
 
         # === AI API 连通性测试模块 ===
         provider = ai_provider
         st.markdown(f"### {ui('', '')} {provider} {ui('连通性测试', 'Connectivity Test')}")
         
-        test_api_key = qwen_api_key_stored if provider == "通义千问 (Qwen)" else gemini_api_key_stored
-        
+        if provider == "通义千问 (Qwen)":
+            test_api_key = qwen_api_key_stored
+        elif provider == "Claude (中转)":
+            test_api_key = claude_api_key_stored
+        else:
+            test_api_key = gemini_api_key_stored
+
         if test_api_key:
             if st.button(ui(f"测试 {provider} 接口", f"Test {provider} API"), type="secondary"):
                 with st.spinner(ui("正在连接 AI 服务器进行测试...", "Connecting to AI server for testing...")):
                     try:
                         if provider == "通义千问 (Qwen)":
                             client = OpenAI(
-                                api_key=test_api_key, 
+                                api_key=test_api_key,
                                 base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                             )
                             completion = client.chat.completions.create(
@@ -4276,7 +4441,19 @@ def main():
                             )
                             resp_text = completion.choices[0].message.content
                             st.success(ui(f"**测试通过！** 模型回复内容: `{resp_text.strip()}`", f"**Test passed!** Response: `{resp_text.strip()}`"))
-                            
+
+                        elif provider == "Claude (中转)":
+                            _test_cfg = {
+                                "claude_api_key": test_api_key,
+                                "claude_base_url": st.session_state.get("settings_claude_base_url", config.get("claude_base_url", "")),
+                                "claude_model": st.session_state.get("settings_claude_model", config.get("claude_model", "")),
+                            }
+                            ok_c, resp_c = test_claude_connection(_test_cfg)
+                            if ok_c:
+                                st.success(ui(f"**测试通过！** 模型回复内容: `{resp_c}`", f"**Test passed!** Response: `{resp_c}`"))
+                            else:
+                                st.error(ui("连通失败！", "Connectivity test failed: ") + str(resp_c))
+
                         else: # Gemini
                             genai.configure(api_key=test_api_key)
                             resp, used_model = _gemini_generate_content_with_fallback(

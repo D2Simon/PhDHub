@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 
 import google.generativeai as genai
@@ -10,6 +11,149 @@ from openai import OpenAI
 
 
 _GEMINI_MODEL = "gemini-2.5-flash"
+_CLAUDE_MODEL = "claude-opus-4-8"
+_CLAUDE_DEFAULT_BASE_URL = "https://capi.aerolink.lat/"
+
+
+def _claude_base_url(config):
+    url = str((config or {}).get("claude_base_url", "") or "").strip()
+    return url or _CLAUDE_DEFAULT_BASE_URL
+
+
+def _call_claude_native(prompt, api_key, base, model, temperature, max_tokens, prefill=""):
+    """走 Anthropic 原生协议 /v1/messages（对应 CC 的 ANTHROPIC_BASE_URL）。
+
+    prefill 非空时，预填一段 assistant 内容强制模型从该处续写（用于逼出纯 JSON）。
+    """
+    url = f"{base}/v1/messages"
+    messages = [{"role": "user", "content": prompt}]
+    if prefill:
+        messages.append({"role": "assistant", "content": prefill})
+    body = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": messages,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("x-api-key", api_key)
+    req.add_header("Authorization", f"Bearer {api_key}")  # 部分中转站认这个头
+    req.add_header("anthropic-version", "2023-06-01")
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 把中转站返回的错误正文带出来，便于定位（否则只剩一句 400 Bad Request）
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code} {detail}".strip()) from None
+    # 标准响应：{"content":[{"type":"text","text":"..."}], ...}
+    parts = data.get("content", []) if isinstance(data, dict) else []
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
+    # 预填的开头不会包含在响应里，需要拼回去
+    return (prefill + text).strip() if prefill else text.strip()
+
+
+def _call_claude_openai(prompt, api_key, base, model, temperature, max_tokens, prefill=""):
+    """回退：走 OpenAI 兼容路由 /v1/chat/completions。"""
+    client = OpenAI(api_key=api_key, base_url=f"{base}/v1")
+    messages = [{"role": "user", "content": prompt}]
+    if prefill:
+        messages.append({"role": "assistant", "content": prefill})
+    completion = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    text = (completion.choices[0].message.content or "").strip()
+    return (prefill + text).strip() if prefill and not text.lstrip().startswith(prefill.strip()) else text
+
+
+def _call_claude(prompt, config, temperature=0.3, max_tokens=8000, prefill=""):
+    """调用 Anthropic 兼容中转站（如 capi.aerolink.lat）。
+
+    优先用原生 /v1/messages（对应 CC 的 ANTHROPIC_BASE_URL，最稳）；
+    失败再回退到 OpenAI 兼容 /v1/chat/completions。返回 (ok, text_or_error)。
+    """
+    api_key = str((config or {}).get("claude_api_key", "") or "").strip()
+    if not api_key:
+        return False, "Missing Claude API Key"
+    base = _claude_base_url(config).rstrip("/")
+    model = str((config or {}).get("claude_model", "") or "").strip() or _CLAUDE_MODEL
+    errors = []
+    for name, fn in (("messages", _call_claude_native), ("chat/completions", _call_claude_openai)):
+        try:
+            text = fn(prompt, api_key, base, model, temperature, max_tokens, prefill)
+            if text:
+                return True, text
+            errors.append(f"{name}: 空响应")
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    return False, f"{model} — " + " | ".join(errors)
+
+
+def _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
+    """流式调用中转站原生 /v1/messages（SSE）。逐段 yield 增量文本。
+
+    若中转站不支持流式 / 出错，抛异常由上层回退到非流式。
+    """
+    api_key = str((config or {}).get("claude_api_key", "") or "").strip()
+    if not api_key:
+        raise RuntimeError("Missing Claude API Key")
+    base = _claude_base_url(config).rstrip("/")
+    model = str((config or {}).get("claude_model", "") or "").strip() or _CLAUDE_MODEL
+    url = f"{base}/v1/messages"
+    body = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    req.add_header("x-api-key", api_key)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("anthropic-version", "2023-06-01")
+    try:
+        resp = urllib.request.urlopen(req, timeout=300)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code} {detail}".strip()) from None
+    got_any = False
+    for raw in resp:
+        line = raw.decode("utf-8", "ignore").strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            evt = json.loads(payload)
+        except Exception:
+            continue
+        etype = evt.get("type")
+        # Anthropic 原生：content_block_delta -> delta.text
+        if etype == "content_block_delta":
+            delta = (evt.get("delta") or {}).get("text", "")
+            if delta:
+                got_any = True
+                yield delta
+        elif etype == "message_stop":
+            break
+        elif etype == "error":
+            msg = (evt.get("error") or {}).get("message", "stream error")
+            raise RuntimeError(msg)
+    if not got_any:
+        raise RuntimeError("流式无内容（中转站可能不支持 stream）")
 
 
 def _strip_code_fence(text):
@@ -43,8 +187,20 @@ def _call_gemini_with_fallback(prompt, api_key, temperature=0.3):
         return False, f"{_GEMINI_MODEL}: {e}", ""
 
 
+def test_claude_connection(config):
+    """连通性探针：返回 (ok, 回复文本或错误)。"""
+    return _call_claude(
+        "Please strictly reply: 'API is working!' in English without any other words.",
+        config,
+        temperature=0.0,
+        max_tokens=64,
+    )
+
+
 def _call_llm(prompt, config, temperature=0.3):
     provider = config.get("ai_provider", "通义千问 (Qwen)")
+    if provider == "Claude (中转)":
+        return _call_claude(prompt, config, temperature=temperature)
     if provider == "通义千问 (Qwen)":
         api_key = config.get("qwen_api_key")
         if not api_key:
@@ -798,3 +954,166 @@ Provide your response EXACTLY in JSON format without markdown code blocks:
     except Exception as e:
         print(f"Validation failed for {url}: {e}")
         return {"is_real_homepage": False, "reasoning": str(e), "scraped_text": ""}
+
+
+# ==========================================================================
+# 批量生成导师名单（直接调用 LLM，替代“下载提示词给 GPT”手动流程）
+# ==========================================================================
+
+_PROF_FIELDS = [
+    "导师/教授", "学校名称", "导师邮箱", "国家/地区", "院系", "主页链接",
+    "研究方向", "推荐级", "阶段", "面试时间", "更新时间", "创建时间",
+    "关联邮件ID", "LLM摘要",
+]
+
+
+def build_professor_gen_prompt(direction, regions, count, extra):
+    """构造让 LLM 直接产出导师名单 JSON 的提示词（要求纯 JSON、无多余文字）。"""
+    reqs = []
+    if str(direction).strip():
+        reqs.append(f"研究方向：{str(direction).strip()}")
+    if str(regions).strip():
+        reqs.append(f"地区 / 目标学校：{str(regions).strip()}")
+    if str(count).strip():
+        reqs.append(f"数量：{str(count).strip()}")
+    else:
+        reqs.append("数量：尽可能列全，每所学校把符合方向的老师都列出来（宁多勿少，不要只给两三位）。")
+    if str(extra).strip():
+        reqs.append(f"补充说明：{str(extra).strip()}")
+    req_block = "\n".join(reqs) if reqs else "（未填写具体需求，请合理推断常见的相关学校与老师）"
+
+    return f"""你是一个学术导师信息整理助手。请根据「我的需求」，整理一份真实存在的导师名单。
+
+## 输出格式（必须严格遵守）
+- 你的回复必须以 `{{` 开头、以 `}}` 结尾，整条回复本身就是一个合法 JSON 对象。
+- 绝对不要输出任何解释、前言、结语、markdown 代码块围栏（不要 ```），不要说“好的”“以下是”之类的话。
+- 顶层是对象，唯一键为 "professors"，值为导师对象数组：{{ "professors": [ {{…}}, … ] }}
+- 控制数量以确保 JSON 完整闭合、不被截断；宁可少列几位也不要中途断开。
+- 每个导师对象必须包含下列全部字段，键名一字不差（都是中文键名）：
+  - 导师/教授 ：老师姓名（必填）。英文母语老师用英文原名。
+  - 学校名称 ：学校官方英文全名（必填），如 Stanford University、University of Oxford。不要写缩写（别写 MIT，写全称）。
+  - 导师邮箱 ：不确定就留空字符串 ""，不要编造。
+  - 国家/地区 ：学校所在国家/地区英文名，如 United States、United Kingdom、Hong Kong；不确定填 "未知"。
+  - 院系 ：学院/系，如 Computer Science；不确定填 ""。
+  - 主页链接 ：**必填，不能留空**。完整 URL（http/https 开头）。优先给老师的**个人主页 / 实验室主页**；若确实没有个人主页，则给该校院系官网上他的**教职 / 员工 (faculty / people / staff) 介绍页**。这两类页面基本人人都有，务必给出一个真实可访问的链接，绝不编造。
+  - 研究方向 ：几个关键词用逗号分隔；不确定填 "未明确"。
+  - 推荐级 ：只能是 "T0" / "T1" / "T2"，默认 "T1"。
+  - 阶段 ：一律填 "未联系"。
+  - 面试时间 / 更新时间 / 创建时间 / 关联邮件ID ：一律填 ""。
+  - LLM摘要 ：用一句话概括这位导师 / 为什么推荐（不确定填 ""）。
+
+## 硬性要求
+- 只列真实存在的老师，绝不为凑数编造姓名或主页链接。
+- **每位老师都必须有「主页链接」**：个人主页优先，没有就用院系官网的教职/员工介绍页。如果一位老师你连教职页都无法确定，就不要把他列进来。
+- 覆盖各职级（助理/副/正教授、Lecturer、PI），包含交叉学科；不要在一所学校只列两三位就跳走。
+- 学校名用官方英文全名即可，系统会自动对齐 QS 标准名并补排名。
+
+## 我的需求
+{req_block}
+"""
+
+
+def _extract_json_object(text):
+    """从模型输出中稳健提取第一个 JSON 对象（容忍代码围栏 / 前后多余文字 / 截断）。"""
+    cleaned = _strip_code_fence(text or "")
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(cleaned[start:end + 1])
+        except Exception:
+            pass
+    # 兜底：可能因 max_tokens 截断导致括号未闭合，尝试截到最后一个完整的 professor 记录再补齐闭合。
+    if start != -1:
+        frag = cleaned[start:]
+        cut = frag.rfind("}")
+        while cut != -1:
+            candidate = frag[:cut + 1]
+            # 按未闭合的括号数量补齐
+            for suffix in ("]}", "}]}", "}", "]}]}"):
+                try:
+                    return json.loads(candidate + suffix)
+                except Exception:
+                    continue
+            cut = frag.rfind("}", 0, cut)
+    raise ValueError("No JSON object found in model output")
+
+
+def _normalize_prof_rows(profs):
+    """把原始导师 dict 列表规范到统一字段（过滤缺姓名/学校的）。"""
+    result = []
+    for p in profs:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("导师/教授", "")).strip()
+        univ = str(p.get("学校名称", "")).strip()
+        if not name or not univ:
+            continue
+        row = {f: p.get(f, "") for f in _PROF_FIELDS}
+        row["导师/教授"] = name
+        row["学校名称"] = univ
+        if str(row.get("推荐级", "")).strip() not in ("T0", "T1", "T2"):
+            row["推荐级"] = "T1"
+        row["阶段"] = "未联系"
+        result.append(row)
+    return result
+
+
+def parse_professor_payload(text):
+    """把模型输出文本解析为规范导师列表。返回 (ok, rows, error_str)。
+
+    容忍围栏 / 前后废话 / 截断；也可用于流式过程中的“边解析边预览”。
+    """
+    try:
+        payload = _extract_json_object(text)
+    except Exception as e:
+        snippet = (text or "").strip().replace("\n", " ")
+        snippet = snippet[:300] + ("…" if len(snippet) > 300 else "")
+        return False, [], f"解析模型输出失败：{e}。模型原文片段：{snippet or '(空)'}"
+    profs = payload.get("professors", []) if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+    rows = _normalize_prof_rows(profs)
+    if not rows:
+        return False, [], "模型没有返回有效导师记录（缺少「导师/教授」或「学校名称」）。"
+    return True, rows, ""
+
+
+def stream_professor_list(direction, regions, count, extra, config):
+    """流式生成导师名单。
+
+    这是一个生成器：每收到一段增量文本就 yield ("chunk", 到目前为止的全文, 已解析出的行数)；
+    结束时 yield ("done", 完整文本, None) 或 ("error", 错误信息, None)。
+    仅 Claude (中转) 走真流式；其他引擎/不支持流式的中转站由调用方回退到 generate_professor_list。
+    """
+    prompt = build_professor_gen_prompt(direction, regions, count, extra)
+    acc = ""
+    try:
+        for delta in _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
+            acc += delta
+            # 边收边尝试解析，给出“已找到 N 位”的实时计数（失败就先按 0）
+            ok, rows, _ = parse_professor_payload(acc)
+            yield ("chunk", acc, len(rows) if ok else 0)
+        yield ("done", acc, None)
+    except Exception as e:
+        yield ("error", f"{e}", None)
+
+
+def generate_professor_list(direction, regions, count, extra, config):
+    """直接调用配置好的 AI 引擎生成导师名单（非流式）。
+
+    返回 (ok, professors_list, error_str)。professors_list 已按必填字段过滤，
+    但未做学校名归一化 / QS 回填（交由调用方复用既有导入逻辑处理）。
+    """
+    prompt = build_professor_gen_prompt(direction, regions, count, extra)
+    provider = (config or {}).get("ai_provider", "通义千问 (Qwen)")
+    if provider == "Claude (中转)":
+        # 该中转站不接受 assistant 预填，也对超大 max_tokens 敏感 → 用普通请求 + 提示词强约束。
+        ok, text = _call_claude(prompt, config, temperature=0.3, max_tokens=8000)
+    else:
+        ok, text = _call_llm(prompt, config, temperature=0.3)
+    if not ok:
+        return False, [], text
+    return parse_professor_payload(text)
