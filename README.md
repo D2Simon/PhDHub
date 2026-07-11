@@ -1,5 +1,7 @@
 # PhDHub
 
+![Clones in the last 30 days](fig/clone-count.svg)
+
 [English](README.md) | [中文](README_CN.md)
 
 PhDHub is a localized AI workspace for PhD applicants. It connects resume/RP management, email triage, professor tracking, interview preparation, and interview review into one workflow, so you can reduce context switching and follow-up misses.
@@ -16,9 +18,9 @@ Key differences between Lite Mode and Full Mode:
 
 ## UI Preview (Carousel)
 
-![PhDHub UI (EN)](fig/en_fig.png)
+![PhDHub feature overview](fig/phdhub-demo.gif)
 
-![PhDHub UI (CN)](fig/cn_fig.png)
+The clone badge is updated daily from GitHub Traffic data. Repository administrators must add a fine-grained `TRAFFIC_TOKEN` secret with read-only **Administration** permission for this repository.
 
 ## Features
 

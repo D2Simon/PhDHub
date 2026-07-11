@@ -1,5 +1,7 @@
 # PhDHub
 
+![最近 30 天 Clone 数](fig/clone-count.svg)
+
 [中文](README_CN.md) | [English](README.md)
 
 PhDHub 是一个面向博士申请场景的本地化 AI 工作台，把“简历/RP 管理、邮件识别与分类、导师建库、面试准备与复盘”串成一个闭环，帮助申请者减少信息分散和跟进遗漏。
@@ -16,9 +18,9 @@ Lite 版与完整版的主要区别：
 
 ## 界面轮播预览
 
-![PhDHub UI (EN)](fig/en_fig.png)
+![PhDHub 功能概览](fig/phdhub-demo.gif)
 
-![PhDHub UI (CN)](fig/cn_fig.png)
+Clone 徽章每日根据 GitHub Traffic 数据更新。仓库管理员需添加名为 `TRAFFIC_TOKEN` 的 fine-grained Secret，并为本仓库授予只读 **Administration** 权限。
 
 ## 项目具体功能
 

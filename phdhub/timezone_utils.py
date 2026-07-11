@@ -11,6 +11,7 @@ COUNTRY_TZ_MAP = {
     "uk": "Europe/London",
     "china": "Asia/Shanghai",
     "hong kong": "Asia/Hong_Kong",
+    "macau": "Asia/Macau",
     "singapore": "Asia/Singapore",
     "japan": "Asia/Tokyo",
     "france": "Europe/Paris",
@@ -31,6 +32,9 @@ COUNTRY_TZ_MAP = {
     "finland": "Europe/Helsinki",
     "austria": "Europe/Vienna",
     "ireland": "Europe/Dublin",
+    "portugal": "Europe/Lisbon",
+    "greece": "Europe/Athens",
+    "belgium": "Europe/Brussels",
 }
 
 
@@ -58,7 +62,6 @@ def format_local_time(raw_country):
         return "未知"
     try:
         now = datetime.now(ZoneInfo(tz_name))
-        return now.strftime("%Y-%m-%d %H:%M")
+        return now.strftime("%H:%M · %Y-%m-%d")
     except Exception:
         return "未知"
-

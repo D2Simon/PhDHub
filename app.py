@@ -70,9 +70,13 @@ from phdhub.university import (
     canonical_school_name,
     qs_rank_for,
     country_for,
+    qs_top_by_country,
+    usnews_top100_list,
+    usnews_rank_for,
 )
-# 洲 -> 国家/地区 级联数据：来自内置 QS2026 前500 静态清单（唯一标准）
-from phdhub.qs_top500 import CONTINENTS
+# 洲 -> 国家/地区 级联数据：来自内置 QS 2027 前 500 静态清单（唯一标准）
+from phdhub.qs_top500 import CONTINENTS, QS_EDITION
+from phdhub.usnews_top100 import USNEWS_EDITION
 
 
 COUNTRY_LABELS = {
@@ -124,7 +128,7 @@ IMPORT_PROMPT_TEMPLATE = """# 导师库批量导入 —— 给 GPT 的提示词
    - LLM摘要 ：用一句话概括这位导师 / 为什么推荐（作为 LLM 生成的摘要，不确定填 ""）。
 
 5. 不要编造邮箱和主页链接。不确定就把对应字段留成空字符串 ""，我会自己补。研究方向、院系可基于公开认知合理填写。
-6. 学校名称用官方英文全名即可；我的系统会自动把它对齐到 QS 2026 前 500 的标准名并补上 QS 排名，所以带不带 "The"、大小写都没关系，但请不要写缩写（如别写 "MIT"，写全称）。
+6. 学校名称用官方英文全名即可；我的系统会自动把它对齐到 QS 2027 前 500 的标准名并补上 QS 排名，所以带不带 "The"、大小写都没关系，但请不要写缩写（如别写 "MIT"，写全称）。
 
 7. 【执行流程 ｜ 必须严格按顺序执行，不可跳过、不可偷懒】
 
@@ -244,7 +248,7 @@ def lite_prof_form(key_prefix, compact=False, show_contact=True):
                 if choice == manual_label:
                     univ = st.text_input(_ui_local("学校名称", "University name"), key=f"{key_prefix}_puniv").strip()
                 else:
-                    univ = re.sub(r"\s*\(QS.*?\)\s*$", "", choice).strip()
+                    univ = re.sub(r"\s*\([^)]*\)\s*$", "", choice).strip()
             else:
                 univ = st.text_input(_ui_local("学校", "University"), key=f"{key_prefix}_puniv").strip()
         # 第二行：导师姓名 / 学院 / 研究方向 / 意向级别
@@ -291,7 +295,7 @@ def lite_prof_form(key_prefix, compact=False, show_contact=True):
 @st.dialog("新建导师 / Add Professor")
 def add_professor_dialog():
     """浮窗：直接向导师库新增一位导师（默认未联系）。"""
-    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
     p = lite_prof_form("db_new", compact=True)
     stage = st.selectbox(_ui_local("当前阶段", "Stage"), stage_opts, index=0, key="db_new_stage")
     note = st.text_area(_ui_local("备注（选填）", "Note (optional)"),
@@ -311,7 +315,9 @@ def add_professor_dialog():
                 "学校名称": canonical_school_name(p["univ"]), "院系": p["dept"], "主页链接": p["home"],
                 "研究方向": p["dir"] or "未明确", "推荐级": p["prio"], "阶段": stage,
                 "面试时间": "", "更新时间": now, "创建时间": now, "关联邮件ID": "",
+                "首封邮件时间": now if stage == "已发首封邮件" else "",
                 "LLM摘要": "", "备注": note.strip(), "来源": "手动", "QS排名": qs_rank_for(p["univ"]),
+                "USNews排名": usnews_rank_for(p["univ"]),
             })
             save_db(cur)
             for k in ["db_new_pname", "db_new_puniv", "db_new_pdept", "db_new_pdir",
@@ -328,7 +334,7 @@ def edit_professor_dialog(real_idx):
         st.error(_ui_local("记录不存在，请刷新后重试。", "Record not found, please refresh."))
         return
     rec = db[real_idx]
-    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+    stage_opts = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
     prio_opts = ["T0", "T1", "T2"]
     k = f"edit_{real_idx}"
 
@@ -368,14 +374,14 @@ def edit_professor_dialog(real_idx):
                     break
         manual_label = _ui_local("其他（手动输入）", "Other (manual)")
         if univ_candidates:
-            cleaned = [re.sub(r"\s*\(QS.*?\)\s*$", "", x).strip() for x in univ_candidates]
+            cleaned = [re.sub(r"\s*\([^)]*\)\s*$", "", x).strip() for x in univ_candidates]
             opts = univ_candidates + [manual_label]
             u_idx = cleaned.index(cur_univ) if cur_univ in cleaned else len(opts) - 1
             choice = st.selectbox(_ui_local("学校（必填）", "University (required)"), opts, index=u_idx, key=f"{k}_univsel")
             if choice == manual_label:
                 univ = st.text_input(_ui_local("学校名称", "University name"), value=cur_univ, key=f"{k}_univman").strip()
             else:
-                univ = re.sub(r"\s*\(QS.*?\)\s*$", "", choice).strip()
+                univ = re.sub(r"\s*\([^)]*\)\s*$", "", choice).strip()
         else:
             univ = st.text_input(_ui_local("学校（必填）", "University (required)"),
                                  value=cur_univ, key=f"{k}_univman").strip()
@@ -409,6 +415,8 @@ def edit_professor_dialog(real_idx):
         if not (0 <= real_idx < len(cur)):
             st.error(_ui_local("记录已变化，请刷新后重试。", "Record changed, please refresh."))
             return
+        previous_stage = str(cur[real_idx].get("阶段", "未联系"))
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur[real_idx].update({
             "导师/教授": name.strip(),
             "学校名称": canonical_school_name(univ.strip()),
@@ -422,8 +430,11 @@ def edit_professor_dialog(real_idx):
             "LLM摘要": llm_summary.strip(),
             "备注": note.strip(),
             "QS排名": qs_rank_for(univ.strip()),
-            "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "USNews排名": usnews_rank_for(univ.strip()),
+            "更新时间": now_str,
         })
+        if stage == "已发首封邮件" and previous_stage != stage:
+            cur[real_idx]["首封邮件时间"] = now_str
         save_db(cur)
         st.session_state["db_edit_toast"] = _ui_local("已保存修改", "Changes saved")
         st.rerun()
@@ -478,6 +489,18 @@ def _gemini_generate_content_with_fallback(prompt, stream=False):
 @st.cache_data(ttl=86400)
 def get_world_universities():
     return get_world_universities_impl()
+
+
+def school_ranking_text(university, qs_rank=""):
+    """Return a compact QS/US News label for professor and email views."""
+    labels = []
+    qs_value = qs_rank or qs_rank_for(university)
+    usnews_value = usnews_rank_for(university)
+    if str(qs_value).strip() not in ("", "-", "0"):
+        labels.append(f"QS #{qs_value}")
+    if str(usnews_value).strip() not in ("", "-", "0"):
+        labels.append(f"US News #{usnews_value}")
+    return " · ".join(labels)
 
 
 def get_recent_7d_email_stats():
@@ -1036,8 +1059,29 @@ def purge_lite_emails_for_record(record):
 
 
 _STAGE_ORDER = {s: i for i, s in enumerate(
-    ["未联系", "已发首封邮件", "收到消极回复", "收到中等回复", "收到积极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+    ["未联系", "已发首封邮件", "收到消极回复", "收到中等回复", "收到积极回复", "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
 )}
+
+
+def outreach_waiting_state(record, today=None):
+    """Return follow_up/14_days when a first email is still unanswered."""
+    if record is None:
+        record = {}
+    if str(record.get("阶段", "")) != "已发首封邮件":
+        return ""
+    raw = next((str(record.get(key, "") or "").strip() for key in
+                ("首封邮件时间", "更新时间", "创建时间")
+                if str(record.get(key, "") or "").strip()), "")
+    try:
+        sent_date = datetime.fromisoformat(raw[:19]).date()
+    except (TypeError, ValueError):
+        return ""
+    elapsed_days = ((today or datetime.now().date()) - sent_date).days
+    if elapsed_days >= 14:
+        return "14_days"
+    if elapsed_days > 7:
+        return "follow_up"
+    return ""
 
 
 def _merge_prof(a, b):
@@ -1233,7 +1277,7 @@ def get_dashboard_data():
 def render_status_bar(current_status, interview_time=""):
     step_mapping = {
         "未联系": 0, "已发首封邮件": 1, "收到回复": 2, "收到积极回复": 2, "收到中等回复": 2, "收到消极回复": 2,
-        "面试准备": 3, "面试预约阶段": 3, "面试结束阶段": 3, "口头offer": 4
+        "面试准备": 3, "面试预约阶段": 3, "面试结束阶段": 3, "口头offer": 4, "终止状态": 4
     }
     
     current_index = step_mapping.get(current_status, 0)
@@ -1258,10 +1302,12 @@ def render_status_bar(current_status, interview_time=""):
         statuses[3] = (f"Scheduled{time_str}" if en else f"预约{time_str}")
     elif current_status == "面试结束阶段":
         statuses[3] = ("Done" if en else "结束")
+    elif current_status == "终止状态":
+        statuses[4] = ("Terminated" if en else "终止")
         
     html_parts = ["<div class='status-bar'>"]
     
-    sentiment_class = {"收到积极回复": " pos", "收到消极回复": " neg", "收到中等回复": " neu"}
+    sentiment_class = {"收到积极回复": " pos", "收到消极回复": " neg", "收到中等回复": " neu", "终止状态": " neg"}
     for i, status in enumerate(statuses):
         extra = ""
         if i < current_index:
@@ -1579,6 +1625,35 @@ def show_professor_details(row):
     with c2: st.write(f"**{row.get('院系', '-')}**")
     with c3: st.write(f"**{row.get('阶段', '-')}**")
 
+    stage_options = ["未联系", "已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复",
+                     "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
+    current_stage = str(row.get("阶段", "未联系"))
+    selected_stage = st.selectbox(
+        _ui_local("修改当前状态", "Change current stage"),
+        stage_options,
+        index=stage_options.index(current_stage) if current_stage in stage_options else 0,
+        key=f"details_stage_{getattr(row, 'name', 'prof')}",
+    )
+    if st.button(_ui_local("保存状态", "Save stage"), type="primary", key=f"details_stage_save_{getattr(row, 'name', 'prof')}"):
+        db = load_db()
+        prof_name = str(row.get("导师/教授", ""))
+        university = str(row.get("学校名称", ""))
+        target_idx = next((i for i, record in enumerate(db)
+                           if str(record.get("导师/教授", "")) == prof_name
+                           and str(record.get("学校名称", "")) == university), None)
+        if target_idx is None:
+            st.error(_ui_local("导师记录不存在，请刷新后重试。", "Professor record not found. Refresh and retry."))
+        else:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            old_stage = str(db[target_idx].get("阶段", "未联系"))
+            db[target_idx]["阶段"] = selected_stage
+            db[target_idx]["更新时间"] = now_str
+            if selected_stage == "已发首封邮件" and old_stage != selected_stage:
+                db[target_idx]["首封邮件时间"] = now_str
+            save_db(db)
+            st.session_state["db_edit_toast"] = _ui_local("状态已更新", "Stage updated")
+            st.rerun()
+
     st.write(f"**{_ui_local('研究方向', 'Research')}:** `{row.get('研究方向', _ui_local('未明确', 'N/A'))}`")
 
     if row.get("导师邮箱"):
@@ -1592,7 +1667,7 @@ def show_professor_details(row):
         st.markdown(
             f"<div style='margin:.4rem 0;padding:.5rem .65rem;border-left:3px solid #60a5fa;"
             f"background:rgba(96,165,250,.10);border-radius:6px;font-size:14px;color:#bfdbfe;"
-            f"white-space:pre-wrap;'>🤖 <b>LLM Summary</b> · {html.escape(_llm)}</div>",
+            f"white-space:pre-wrap;'><b>LLM Summary</b> · {html.escape(_llm)}</div>",
             unsafe_allow_html=True,
         )
 
@@ -1601,7 +1676,7 @@ def show_professor_details(row):
         st.markdown(
             f"<div style='margin:.4rem 0;padding:.5rem .65rem;border-left:3px solid #a78bfa;"
             f"background:rgba(167,139,250,.10);border-radius:6px;font-size:14px;color:#d6cffb;"
-            f"white-space:pre-wrap;'>📝 {html.escape(_note)}</div>",
+            f"white-space:pre-wrap;'>{html.escape(_note)}</div>",
             unsafe_allow_html=True,
         )
 
@@ -1722,6 +1797,7 @@ def main():
         templates_menu_label = ui("套瓷信模版", "Cold-Email Templates")
         review_menu_label = ui("面试回顾", "Interview Review")
         clock_menu_label = ui("世界时钟", "World Clock")
+        schoollist_menu_label = ui("院校榜单", "School List")
 
         # 用稳定的页面 id 作为导航选项，切换语言时保持当前页面不变
         label_map = {
@@ -1734,13 +1810,14 @@ def main():
             "interview": t("menu_interview"),
             "review": review_menu_label,
             "clock": clock_menu_label,
+            "schoollist": schoollist_menu_label,
             "settings": settings_menu_label,
             "data": data_mgmt_label,
         }
         if lite_mode:
-            page_ids = ["dashboard", "email", "db", "templates", "review", "clock", "settings", "data"]
+            page_ids = ["dashboard", "email", "db", "templates", "review", "clock", "schoollist", "settings", "data"]
         else:
-            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "clock", "settings"]
+            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "clock", "schoollist", "settings"]
 
         # 清理早期版本可能残留的旧导航 key（其值可能是标签而非页面 id）
         for _stale in ("nav_radio_lite", "nav_radio_full"):
@@ -2286,18 +2363,20 @@ def main():
         all_label = ui("全部", "All")
         # 活跃流程的阶段（不含「未联系」），并提供「面试环节」等快捷分组
         ACTIVE_STAGES = ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复",
-                         "面试预约阶段", "面试结束阶段", "口头offer"]
+                         "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
         STAGE_GROUPS = {
             ui("📨 首封邮件", "📨 First email"): ["已发首封邮件"],
             ui("💬 收到回复", "💬 Got reply"): ["收到积极回复", "收到中等回复", "收到消极回复"],
             ui("🎤 面试环节", "🎤 Interview"): ["面试预约阶段", "面试结束阶段"],
             ui("🎉 口头 offer", "🎉 Verbal offer"): ["口头offer"],
+            ui("终止", "Terminated"): ["终止状态"],
         }
         STAGE_EN = {
             "已发首封邮件": "First email sent", "收到积极回复": "Positive reply",
             "收到中等回复": "Neutral reply", "收到消极回复": "Negative reply",
             "面试预约阶段": "Interview scheduled", "面试结束阶段": "Interview done",
             "口头offer": "Verbal offer",
+            "终止状态": "Terminated",
         }
         stage_options = [all_label] + list(STAGE_GROUPS.keys()) + ACTIVE_STAGES
 
@@ -2347,6 +2426,10 @@ def main():
             with c2:
                 # 渲染用户要求的进度条
                 render_status_bar(row.get('阶段', '未联系'), row.get('面试时间', ''))
+                _waiting = outreach_waiting_state(row)
+                if _waiting:
+                    st.caption(ui("待 Follow up", "Follow up due") if _waiting == "follow_up"
+                               else ui("14 天未回复", "No reply for 14 days"))
 
             with c3:
                 st.markdown(f"**{ui('研究方向', 'Research')}:**<br><span style='font-size:15px; color:#d6e4ff; font-weight:600;'>{row.get('研究方向', ui('未明确', 'N/A'))}</span>", unsafe_allow_html=True)
@@ -2539,7 +2622,11 @@ def main():
                     st.warning(ui("导师库为空，请改用『新建导师』，或先到『导师库管理』里添加。",
                                   "Professor DB is empty. Use 'Create new professor', or add one on the Professor DB page."))
                 else:
-                    prof_options = {f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')}) · {r.get('阶段', '未联系')}": i for i, r in enumerate(db)}
+                    prof_options = {
+                        f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')})"
+                        f" · {school_ranking_text(r.get('学校名称', ''), r.get('QS排名', ''))}"
+                        f" · {r.get('阶段', '未联系')}": i for i, r in enumerate(db)
+                    }
                     sel_str = st.selectbox(ui("选择导师库中的导师", "Select a professor from the DB"), list(prof_options.keys()), key="lite_fc_selprof")
                     sel_idx = prof_options[sel_str]
             else:
@@ -2547,7 +2634,11 @@ def main():
                     st.warning(ui("导师库为空，请先用『已发送套磁信』登记一位导师。",
                                   "Professor DB is empty. Add a professor via 'Inquiry sent' first."))
                 else:
-                    prof_options = {f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')})": i for i, r in enumerate(db)}
+                    prof_options = {
+                        f"{r.get('导师/教授', '?')} ({r.get('学校名称', '?')})"
+                        f" · {school_ranking_text(r.get('学校名称', ''), r.get('QS排名', ''))}": i
+                        for i, r in enumerate(db)
+                    }
                     sel_str = st.selectbox(ui("选择已有导师", "Select existing professor"), list(prof_options.keys()), key="lite_selprof")
                     sel_idx = prof_options[sel_str]
             creating = bool(is_first_contact and fc_mode == fc_create_label)
@@ -2640,10 +2731,12 @@ def main():
                             "面试时间": interview_time,
                             "更新时间": now_str,
                             "创建时间": created_str,
+                            "首封邮件时间": created_str if cat_id == 1 else "",
                             "关联邮件ID": mail_id,
                             "备注": "",
                             "来源": "手动",
                             "QS排名": qs_rank_for(new_prof["univ"]),
+                            "USNews排名": usnews_rank_for(new_prof["univ"]),
                         })
                         save_db(cur_db)
                         st.session_state["lite_saved_msg"] = ui(f"已登记导师 {prof_name} 并加入套瓷看板。", f"Added {prof_name} to the dashboard.")
@@ -2652,6 +2745,8 @@ def main():
                             st.session_state.pop(k, None)
                     else:
                         cur_db[sel_idx]["阶段"] = cat_to_status[cat_id]
+                        if cat_id == 1 and not cur_db[sel_idx].get("首封邮件时间"):
+                            cur_db[sel_idx]["首封邮件时间"] = now_str
                         if interview_time:
                             cur_db[sel_idx]["面试时间"] = interview_time
                         cur_db[sel_idx]["更新时间"] = now_str
@@ -2674,12 +2769,21 @@ def main():
         if not lite_list:
             st.caption(ui("还没有手动邮件记录。", "No manual email records yet."))
         else:
+            _db_by_prof = {str(r.get("导师/教授", "")): r for r in load_db()}
             for i, em in enumerate(lite_list):
                 cc1, cc2 = st.columns([5, 1])
                 with cc1:
                     prof_title = em.get("linked_prof") or ui("(未关联导师)", "(no professor)")
+                    _linked_record = _db_by_prof.get(str(prof_title), {})
+                    _rank_text = school_ranking_text(
+                        _linked_record.get("学校名称", ""), _linked_record.get("QS排名", "")
+                    )
+                    _linked_school = str(_linked_record.get("学校名称", "") or "").strip()
                     st.markdown(
-                        f"**{html.escape(prof_title)}**  ·  <span class='tag'>{cat_name_map.get(em.get('phd_category'), '?')}</span>",
+                        f"**{html.escape(prof_title)}**"
+                        + (f" ({html.escape(_linked_school)})" if _linked_school else "")
+                        + f"  ·  <span class='tag'>{cat_name_map.get(em.get('phd_category'), '?')}</span>"
+                        + (f" · {html.escape(_rank_text)}" if _rank_text else ""),
                         unsafe_allow_html=True,
                     )
                     st.caption(f"{em.get('date', '')}")
@@ -2727,7 +2831,7 @@ def main():
                 for record in db:
                     if "关联邮件ID" in record and record["关联邮件ID"]:
                         for mid in str(record["关联邮件ID"]).split(","):
-                            marked_emails[mid.strip()] = record.get("导师/教授")
+                            marked_emails[mid.strip()] = record
 
                 col_list, col_mail, col_form = st.columns([1, 1.8, 1])
                 
@@ -2751,10 +2855,19 @@ def main():
                 
                 with col_mail:
                     if mail_id in marked_emails:
+                        _marked_prof = marked_emails[mail_id]
+                        _marked_name = str(_marked_prof.get("导师/教授", ""))
+                        _marked_school = str(_marked_prof.get("学校名称", ""))
+                        _marked_ranks = school_ranking_text(
+                            _marked_school, _marked_prof.get("QS排名", "")
+                        )
+                        _marked_summary = " · ".join(
+                            value for value in (_marked_name, _marked_school, _marked_ranks) if value
+                        )
                         col_alert, col_action = st.columns([4, 1.5])
                         with col_alert:
-                            st.success(ui(f"**已提取！** 导师：`{marked_emails[mail_id]}`",
-                                          f"**Extracted!** Professor: `{marked_emails[mail_id]}`"))
+                            st.success(ui(f"**已提取！** {_marked_summary}",
+                                          f"**Extracted!** {_marked_summary}"))
                         with col_action:
                             if st.button(t("cancel"), key=f"unmark_{mail_id}", use_container_width=True):
                                 current_db = load_db()
@@ -3317,7 +3430,7 @@ def main():
                                 p_i = opts_p.index(default_prio) if default_prio in opts_p else 1
                                 priority = st.selectbox("意向推荐级", opts_p, index=p_i, key=f"prio_{mail_id}")
                             with col_s2:
-                                status = st.selectbox("当前阶段", ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"], index=default_status_idx, key=f"stat_{mail_id}")
+                                status = st.selectbox("当前阶段", ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"], index=default_status_idx, key=f"stat_{mail_id}")
                             interview_time = ""
                             if status == "面试预约阶段":
                                 dft_date, dft_time = get_interview_picker_defaults(st.session_state.get(f"intv_{mail_id}", ""))
@@ -3363,6 +3476,7 @@ def main():
                                         "关联邮件ID": mail_id,
                                         "来源": "手动",
                                         "QS排名": qs_rank_for(final_univ),
+                                        "USNews排名": usnews_rank_for(final_univ),
                                     }
                                     current_db.append(new_row)
                                     save_db(current_db)
@@ -3398,7 +3512,11 @@ def main():
                                 st.warning(ui("导师数据库为空，请先在『新建导师记录』模式下创建！",
                                               "Professor DB is empty. Please create a new record first."))
                             else:
-                                prof_options = {f"{r['导师/教授']} ({r.get('学校名称','未知')} - {r.get('院系','')})": i for i, r in enumerate(current_db)}
+                                prof_options = {
+                                    f"{r['导师/教授']} ({r.get('学校名称','未知')} - {r.get('院系','')})"
+                                    f" · {school_ranking_text(r.get('学校名称', ''), r.get('QS排名', ''))}": i
+                                    for i, r in enumerate(current_db)
+                                }
                                 
                                 preselect_prof_idx = 0
                                 if default_prof_email:
@@ -3413,7 +3531,7 @@ def main():
                                 
                                 val_email = default_prof_email if default_prof_email else sel_r.get("导师邮箱", "")
                                 
-                                status_choices = ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer"]
+                                status_choices = ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复", "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
                                 cur_stat = sel_r.get("阶段", "已发首封邮件")
                                 if cur_stat not in status_choices: cur_stat = "已发首封邮件"
                                 
@@ -3455,6 +3573,8 @@ def main():
 
     elif menu == t("menu_db"):
         st.title(ui("导师库管理", "Professor DB"))
+        # Keep the minute-level local clocks current while this page is open.
+        st_autorefresh(interval=30000, key="professor_db_local_time_tick")
         _edit_toast = st.session_state.pop("db_edit_toast", None)
         if _edit_toast:
             st.toast(_edit_toast)
@@ -3471,14 +3591,25 @@ def main():
         if _bulk_toast:
             st.toast(_bulk_toast)
 
-        with st.expander(ui("批量导入导师（用 GPT 生成文件）", "Bulk-import professors (generate the file with GPT)"), expanded=False):
+        _open_bulk_import = st.button(
+            ui("批量导入导师", "Bulk import"),
+            key="db_open_bulk_import",
+        )
+        if _open_bulk_import:
+            st.session_state["db_bulk_dialog_open"] = True
+
+        @st.dialog(ui("批量导入导师", "Bulk import professors"), width="large")
+        def bulk_import_professors_dialog():
+            if st.button(ui("关闭", "Close"), key="db_close_bulk_import"):
+                st.session_state["db_bulk_dialog_open"] = False
+                st.rerun()
             st.markdown(ui(
                 "**第 1 步**：填写你的需求 → 点「生成并下载提示词」。\n\n"
                 "**第 2 步**：把下载的内容整段贴给 ChatGPT（建议用带代码解释器的模型，如 GPT‑5 Thinking）。它会把结果存成文件并给你一个 `.json` **下载链接**，点链接下载即可——无需手动复制粘贴。\n\n"
-                "**第 3 步**：在下方上传该 JSON 完成导入。系统会自动把学校名对齐到 QS 2026 前 500 标准名、补上 QS 排名。",
+                "**第 3 步**：在下方上传该 JSON 完成导入。系统会自动把学校名对齐到 QS 2027 前 500 标准名、补上 QS 排名。",
                 "**Step 1**: fill in your request → click 'Generate & download prompt'.\n\n"
                 "**Step 2**: paste it whole into ChatGPT (use a model with the code-interpreter tool). It saves the result to a file and gives you a `.json` **download link** — no copy-paste needed.\n\n"
-                "**Step 3**: upload that JSON below. The system auto-aligns school names to the QS 2026 top-500 and fills QS rank."))
+                "**Step 3**: upload that JSON below. The system auto-aligns school names to the QS 2027 top-500 and fills QS rank."))
 
             # 表单值持久化：会话首次进入时，从本地配置回填（重启后仍可复用）
             if not st.session_state.get("_db_tpl_loaded"):
@@ -3545,6 +3676,7 @@ def main():
                             canon = canonical_school_name(str(p.get("学校名称", "")).strip())
                             p["学校名称"] = canon
                             p["QS排名"] = qs_rank_for(canon)
+                            p["USNews排名"] = usnews_rank_for(canon)
                             _qs_country = country_for(canon)
                             if _qs_country:
                                 p["国家/地区"] = _qs_country
@@ -3690,10 +3822,12 @@ def main():
                         st.session_state["db_bulk_import_toast"] = ui(
                             f"已导入 {len(cleaned)} 位，导师库现有 {len(new_db)} 位。",
                             f"Imported {len(cleaned)}; DB now has {len(new_db)} professors.")
+                        st.session_state["db_bulk_dialog_open"] = False
                         st.rerun()
                 if cimp2.button(ui("放弃这批结果", "Discard"), use_container_width=True, key="db_ai_import_discard"):
                     for _k in ("db_ai_preview", "db_ai_only_verified", "db_ai_select_all"):
                         st.session_state.pop(_k, None)
+                    st.session_state["db_bulk_dialog_open"] = False
                     st.rerun()
 
             st.divider()
@@ -3715,6 +3849,7 @@ def main():
                         canon = canonical_school_name(str(p.get("学校名称", "")).strip())
                         p["学校名称"] = canon
                         p["QS排名"] = qs_rank_for(canon)
+                        p["USNews排名"] = usnews_rank_for(canon)
                         _qs_country = country_for(canon)
                         if _qs_country:
                             p["国家/地区"] = _qs_country
@@ -3735,9 +3870,13 @@ def main():
                         st.session_state["db_bulk_import_toast"] = ui(
                             f"成功导入 {len(imp_profs)} 条，导师库现有 {len(new_db)} 位。",
                             f"Imported {len(imp_profs)} records; DB now has {len(new_db)} professors.")
+                        st.session_state["db_bulk_dialog_open"] = False
                         st.rerun()
                 except Exception as e:
                     st.error(ui(f"导入失败：{e}", f"Import failed: {e}"))
+
+        if st.session_state.get("db_bulk_dialog_open", False):
+            bulk_import_professors_dialog()
 
         current_db = load_db()
         if not current_db:
@@ -3842,12 +3981,43 @@ def main():
                             if qs_rank and qs_rank not in ("-", "0"):
                                 qs_badge = (f"<span style='margin-left:.4rem;font-size:11px;padding:1px 7px;border-radius:8px;"
                                             f"background:rgba(167,139,250,.15);color:#c4b5fd;border:1px solid #a78bfa55;'>QS #{html.escape(qs_rank)}</span>")
-                            st.markdown(f"<span class='tag'>{row.get('阶段', '-')}</span>{_src_badge}{qs_badge}", unsafe_allow_html=True)
+                            usnews_rank = str(
+                                row.get("USNews排名", "")
+                                or usnews_rank_for(row.get("学校名称", ""))
+                                or ""
+                            ).strip()
+                            usnews_badge = ""
+                            if usnews_rank and usnews_rank not in ("-", "0"):
+                                usnews_badge = (
+                                    f"<span style='margin-left:.4rem;font-size:11px;padding:1px 7px;border-radius:8px;"
+                                    f"background:rgba(52,211,153,.12);color:#6ee7b7;border:1px solid #34d39955;'>"
+                                    f"US News #{html.escape(usnews_rank)}</span>"
+                                )
+                            _waiting = outreach_waiting_state(row)
+                            _waiting_badge = ""
+                            if _waiting:
+                                _waiting_label = (ui("待 Follow up", "Follow up due") if _waiting == "follow_up"
+                                                  else ui("14 天未回复", "No reply for 14 days"))
+                                _waiting_badge = (
+                                    f"<span style='margin-left:.4rem;font-size:11px;padding:1px 7px;border-radius:8px;"
+                                    f"background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid #f59e0b55;'>"
+                                    f"{html.escape(_waiting_label)}</span>"
+                                )
+                            st.markdown(
+                                f"<span class='tag'>{row.get('阶段', '-')}</span>{_waiting_badge}{_src_badge}{qs_badge}{usnews_badge}",
+                                unsafe_allow_html=True,
+                            )
                             st.markdown(f"**{row.get('学校名称', '-')}**")
                             dept = str(row.get("院系", "") or "").strip()
                             st.caption(f"{row.get('国家/地区', '-')}" + (f" · {dept}" if dept and dept != "-" else ""))
                             st.caption(ui("研究方向：", "Research: ") + str(row.get("研究方向", "-")))
-                            st.caption(ui("当地时间：", "Local time: ") + local_time)
+                            st.markdown(
+                                f"<div style='margin:.3rem 0;color:#c9b8ff;font-size:15px;"
+                                f"font-weight:650;font-variant-numeric:tabular-nums;'>"
+                                f"{ui('导师当地时间', 'Professor local time')}："
+                                f"{html.escape(local_time)}</div>",
+                                unsafe_allow_html=True,
+                            )
                             st.caption(ui("更新：", "Updated: ") + str(row.get("更新时间", "-")))
 
                             llm_val = clean_note(row.get("LLM摘要", ""))
@@ -4378,6 +4548,91 @@ def main():
                             st.session_state["rv_toast"] = ui("已删除面试回顾", "Review deleted")
                             st.rerun()
 
+    elif menu == schoollist_menu_label:
+        st.title(ui("院校榜单", "School List"))
+        st.markdown(
+            f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>"
+            f"{ui('常用申请地区的院校排名清单，供选校参考。', 'Ranking lists for common application regions, for school selection.')}</p>",
+            unsafe_allow_html=True,
+        )
+
+        def _rank_table(rank_name_pairs, rank_col_label):
+            df = pd.DataFrame(
+                [{rank_col_label: rk, ui("学校", "University"): name} for rk, name in rank_name_pairs]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True, height=680,
+                         column_config={rank_col_label: st.column_config.NumberColumn(width="small")})
+
+        _extra_qs_countries = [
+            ("🇸🇬", "新加坡", "Singapore", 5),
+            ("🇲🇴", "澳门", "Macau", None),
+            ("🇯🇵", "日本", "Japan", None),
+            ("🇨🇦", "加拿大", "Canada", None),
+            ("🇩🇪", "德国", "Germany", None),
+            ("🇳🇱", "荷兰", "Netherlands", None),
+            ("🇨🇭", "瑞士", "Switzerland", None),
+            ("🇸🇪", "瑞典", "Sweden", None),
+            ("🇩🇰", "丹麦", "Denmark", None),
+            ("🇫🇮", "芬兰", "Finland", None),
+            ("🇫🇷", "法国", "France", None),
+            ("🇦🇹", "奥地利", "Austria", None),
+            ("🇳🇴", "挪威", "Norway", None),
+            ("🇮🇪", "爱尔兰", "Ireland", None),
+            ("🇮🇹", "意大利", "Italy", None),
+            ("🇪🇸", "西班牙", "Spain", None),
+            ("🇵🇹", "葡萄牙", "Portugal", None),
+            ("🇬🇷", "希腊", "Greece", None),
+        ]
+        _ranking_options = [
+            ("australia", ui("🇦🇺 澳洲 QS 前 8", "🇦🇺 Australia · QS Top 8")),
+            ("new_zealand", ui("🇳🇿 新西兰 QS 前 5", "🇳🇿 New Zealand · QS Top 5")),
+            ("united_states", ui("🇺🇸 美国 US News 前 100", "🇺🇸 US · USNews Top 100")),
+            ("united_kingdom", ui("🇬🇧 英国 QS 前 500", "🇬🇧 UK · QS Top 500")),
+        ] + [
+            (_country, ui(f"{_flag} {_country_cn} QS 前 {_limit or 500}",
+                          f"{_flag} {_country} · QS Top {_limit or 500}"))
+            for _flag, _country_cn, _country, _limit in _extra_qs_countries
+        ]
+        _selected_ranking = st.selectbox(
+            ui("选择国家 / 榜单", "Select country / ranking"),
+            [option_id for option_id, _label in _ranking_options],
+            format_func=dict(_ranking_options).get,
+            key="schoollist_ranking",
+        )
+
+        if _selected_ranking == "australia":
+            st.caption(ui(f"数据来源：QS World University Rankings {QS_EDITION}（澳洲八大名校 Group of Eight）",
+                          f"Source: QS World University Rankings {QS_EDITION} (Australia Group of Eight)"))
+            _rank_table(qs_top_by_country("Australia", 8), ui("QS 排名", "QS Rank"))
+        elif _selected_ranking == "new_zealand":
+            st.caption(ui(f"数据来源：QS World University Rankings {QS_EDITION}（新西兰前 5）",
+                          f"Source: QS World University Rankings {QS_EDITION} (New Zealand top 5)"))
+            _rank_table(qs_top_by_country("New Zealand", 5), ui("QS 排名", "QS Rank"))
+        elif _selected_ranking == "united_states":
+            _usnews = usnews_top100_list()
+            st.caption(ui(f"数据来源：U.S. News & World Report {USNEWS_EDITION} 全美大学排名（Best National Universities，含并列，共 {len(_usnews)} 所）",
+                          f"Source: U.S. News & World Report {USNEWS_EDITION} Best National Universities ({len(_usnews)} schools incl. ties)"))
+            _rank_table(_usnews, ui("US News 排名", "USNews Rank"))
+        elif _selected_ranking == "united_kingdom":
+            _uk = qs_top_by_country("United Kingdom")
+            st.caption(ui(f"数据来源：QS World University Rankings {QS_EDITION}（英国进入全球前 500 的院校，共 {len(_uk)} 所）",
+                          f"Source: QS World University Rankings {QS_EDITION} (UK universities within the global top 500, {len(_uk)} total)"))
+            _rank_table(_uk, ui("QS 排名", "QS Rank"))
+        else:
+            _flag, _country_cn, _country, _limit = next(
+                item for item in _extra_qs_countries if item[2] == _selected_ranking
+            )
+            _schools = qs_top_by_country(_country, _limit)
+            _scope_cn = f"{_country_cn}排名前 {_limit}" if _limit else f"{_country_cn}进入全球前 500 的院校"
+            _scope_en = f"{_country} top {_limit}" if _limit else f"{_country} universities within the global top 500"
+            st.caption(ui(
+                f"数据来源：QS World University Rankings {QS_EDITION}"
+                f"（{_scope_cn}，共 {len(_schools)} 所）",
+                f"Source: QS World University Rankings {QS_EDITION} "
+                f"({_scope_en}, {len(_schools)} total)",
+            ))
+            _rank_table(_schools, ui("QS 排名", "QS Rank"))
+
     elif menu == clock_menu_label:
         import pytz
         from zoneinfo import ZoneInfo
@@ -4441,7 +4696,10 @@ def main():
 
         # 已添加的时钟列表（保存标题，避免删除国家后丢失显示名）
         if "wc_added" not in st.session_state:
-            st.session_state["wc_added"] = []  # [{"tz":..., "title":...}]
+            _saved_clocks = load_config().get("world_clocks", [])
+            st.session_state["wc_added"] = (
+                _saved_clocks if isinstance(_saved_clocks, list) else []
+            )  # [{"tz":..., "title":...}]
 
         if sel_tz:
             sel_title = f"{country_label.get(sel_country, sel_country)} · {_tz_city(sel_tz)}"
@@ -4454,6 +4712,9 @@ def main():
                              use_container_width=True, disabled=_already,
                              help=ui("已在下方列表", "Already added") if _already else None):
                     st.session_state["wc_added"].append({"tz": sel_tz, "title": sel_title})
+                    _clock_cfg = load_config()
+                    _clock_cfg["world_clocks"] = st.session_state["wc_added"]
+                    save_config(_clock_cfg)
                     st.rerun()
 
         st.divider()
@@ -4463,13 +4724,21 @@ def main():
             st.info(ui("上面选好国家与城市，点「＋ 添加」把时钟固定到这里。",
                        "Pick a country and city above, then click ＋ Add to pin a clock here."))
         else:
-            cols = st.columns(min(3, len(added)))
-            for i, item in enumerate(added):
+            # 按国家 / 城市名（title）首字母排序显示
+            display = sorted(added, key=lambda x: str(x.get("title", x.get("tz", ""))).lower())
+            cols = st.columns(min(3, len(display)))
+            for i, item in enumerate(display):
                 with cols[i % len(cols)]:
                     _render_clock(item.get("tz", ""), item.get("title", item.get("tz", "")))
-                    if st.button(ui("移除", "Remove"), key=f"wc_rm_{i}_{item.get('tz','')}",
+                    if st.button(ui("移除", "Remove"), key=f"wc_rm_{item.get('tz','')}",
                                  use_container_width=True):
-                        st.session_state["wc_added"].pop(i)
+                        # 按时区删除（时区唯一），避免排序后索引错位
+                        st.session_state["wc_added"] = [
+                            x for x in st.session_state["wc_added"] if x.get("tz") != item.get("tz")
+                        ]
+                        _clock_cfg = load_config()
+                        _clock_cfg["world_clocks"] = st.session_state["wc_added"]
+                        save_config(_clock_cfg)
                         st.rerun()
 
     elif menu == settings_menu_label:
