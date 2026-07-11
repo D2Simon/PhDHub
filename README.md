@@ -16,9 +16,7 @@ Key differences between Lite Mode and Full Mode:
 
 ## UI Preview (Carousel)
 
-![PhDHub UI (EN)](fig/en_fig.png)
-
-![PhDHub UI (CN)](fig/cn_fig.png)
+![PhDHub feature overview](fig/phdhub-demo.gif)
 
 ## Features
 

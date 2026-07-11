@@ -16,9 +16,7 @@ Lite 版与完整版的主要区别：
 
 ## 界面轮播预览
 
-![PhDHub UI (EN)](fig/en_fig.png)
-
-![PhDHub UI (CN)](fig/cn_fig.png)
+![PhDHub 功能概览](fig/phdhub-demo.gif)
 
 ## 项目具体功能
 
