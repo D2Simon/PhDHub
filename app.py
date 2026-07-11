@@ -23,6 +23,7 @@ from phdhub.ai_services import (
     generate_professor_list,
     parse_professor_payload,
     stream_professor_list,
+    verify_homepages_bulk,
     generate_resume_analysis,
     generate_rp_analysis,
     generate_interview_questions,
@@ -1720,6 +1721,7 @@ def main():
         data_mgmt_label = ui("资料管理", "Data Management")
         templates_menu_label = ui("套瓷信模版", "Cold-Email Templates")
         review_menu_label = ui("面试回顾", "Interview Review")
+        clock_menu_label = ui("世界时钟", "World Clock")
 
         # 用稳定的页面 id 作为导航选项，切换语言时保持当前页面不变
         label_map = {
@@ -1731,13 +1733,14 @@ def main():
             "templates": templates_menu_label,
             "interview": t("menu_interview"),
             "review": review_menu_label,
+            "clock": clock_menu_label,
             "settings": settings_menu_label,
             "data": data_mgmt_label,
         }
         if lite_mode:
-            page_ids = ["dashboard", "email", "db", "templates", "review", "settings", "data"]
+            page_ids = ["dashboard", "email", "db", "templates", "review", "clock", "settings", "data"]
         else:
-            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "settings"]
+            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "clock", "settings"]
 
         # 清理早期版本可能残留的旧导航 key（其值可能是标签而非页面 id）
         for _stale in ("nav_radio_lite", "nav_radio_full"):
@@ -2220,50 +2223,55 @@ def main():
                     return None
             
             df['iso_alpha'] = df['国家/地区'].apply(get_iso3)
-            recent_df = df[df['创建日期'] > seven_days_ago.date()]
-            
-            country_stats = df.groupby(['国家/地区', 'iso_alpha']).size().reset_index(name='总套瓷数')
-            recent_country_stats = recent_df.groupby(['国家/地区', 'iso_alpha']).size().reset_index(name='本周新增')
-            
-            map_df = pd.merge(country_stats, recent_country_stats, on=['国家/地区', 'iso_alpha'], how='left').fillna(0)
-            map_df['hover_text'] = map_df['国家/地区'] + "<br>总套瓷数: " + map_df['总套瓷数'].astype(str) + "<br>本周新增: " + map_df['本周新增'].astype(str)
-            
-            import plotly.graph_objects as go
-            fig_map = px.choropleth(map_df, locations="iso_alpha",
-                                    color="总套瓷数", hover_name="hover_text",
-                                    color_continuous_scale=[[0, '#1d1d22'], [0.5, '#473b70'], [1, '#8e6bef']],
-                                    range_color=[1, 100],
-                                    title="全球套瓷地区分布图")
-            
-            # 为所有有 ISO 编码的地区都打上气泡点，确保香港/新加坡等小面积地区也能显示
-            pt_df = map_df[map_df['iso_alpha'].notna() & (map_df['iso_alpha'].astype(str) != "")].copy()
-            if not pt_df.empty:
-                counts = pt_df['总套瓷数'].astype(float)
-                cmax = counts.max() if counts.max() > 0 else 1
-                sizes = 11 + (counts / cmax) * 20  # 11~31，按套瓷数缩放
-                fig_map.add_trace(go.Scattergeo(
-                    locations=pt_df['iso_alpha'],
-                    text=pt_df['国家/地区'] + " (" + pt_df['总套瓷数'].astype(int).astype(str) + ")",
-                    mode='markers+text',
-                    marker=dict(size=sizes, color='#a78bfa', opacity=0.9,
-                                line=dict(width=1.5, color='#ececee')),
-                    textfont=dict(color='#ececee', size=12),
-                    textposition="top center",
-                    hoverinfo="text",
-                    showlegend=False
-                ))
+            # 地图只统计已进入套瓷流程（已发送）的导师，未联系的目标不计入
+            map_src = df[df['阶段'].astype(str) != '未联系'] if '阶段' in df.columns else df
+            map_recent = map_src[map_src['创建日期'] > seven_days_ago.date()]
 
-            fig_map.update_layout(geo=dict(showframe=False, showcoastlines=True, bgcolor='rgba(0,0,0,0)',
-                                           landcolor='#16161a', lakecolor='#0c0c0d', coastlinecolor='#26262c',
-                                           showland=True, showocean=True, oceancolor='#0c0c0d'),
-                                  paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#ececee'))
-                                  
             c_chart1, c_chart2 = st.columns(2)
             with c_chart1:
                 st.plotly_chart(fig_bar, use_container_width=True)
             with c_chart2:
-                st.plotly_chart(fig_map, use_container_width=True)
-                
+                if map_src.empty:
+                    st.info(ui("还没有已发送套瓷的导师，地图暂无数据。",
+                               "No professors contacted yet — map has no data."))
+                else:
+                    country_stats = map_src.groupby(['国家/地区', 'iso_alpha']).size().reset_index(name='总套瓷数')
+                    recent_country_stats = map_recent.groupby(['国家/地区', 'iso_alpha']).size().reset_index(name='本周新增')
+
+                    map_df = pd.merge(country_stats, recent_country_stats, on=['国家/地区', 'iso_alpha'], how='left').fillna(0)
+                    map_df['hover_text'] = map_df['国家/地区'] + "<br>总套瓷数: " + map_df['总套瓷数'].astype(str) + "<br>本周新增: " + map_df['本周新增'].astype(str)
+
+                    import plotly.graph_objects as go
+                    fig_map = px.choropleth(map_df, locations="iso_alpha",
+                                            color="总套瓷数", hover_name="hover_text",
+                                            color_continuous_scale=[[0, '#1d1d22'], [0.5, '#473b70'], [1, '#8e6bef']],
+                                            range_color=[1, 100],
+                                            title="全球套瓷地区分布图（仅已发送）")
+
+                    # 为所有有 ISO 编码的地区都打上气泡点，确保香港/新加坡等小面积地区也能显示
+                    pt_df = map_df[map_df['iso_alpha'].notna() & (map_df['iso_alpha'].astype(str) != "")].copy()
+                    if not pt_df.empty:
+                        counts = pt_df['总套瓷数'].astype(float)
+                        cmax = counts.max() if counts.max() > 0 else 1
+                        sizes = 11 + (counts / cmax) * 20  # 11~31，按套瓷数缩放
+                        fig_map.add_trace(go.Scattergeo(
+                            locations=pt_df['iso_alpha'],
+                            text=pt_df['国家/地区'] + " (" + pt_df['总套瓷数'].astype(int).astype(str) + ")",
+                            mode='markers+text',
+                            marker=dict(size=sizes, color='#a78bfa', opacity=0.9,
+                                        line=dict(width=1.5, color='#ececee')),
+                            textfont=dict(color='#ececee', size=12),
+                            textposition="top center",
+                            hoverinfo="text",
+                            showlegend=False
+                        ))
+
+                    fig_map.update_layout(geo=dict(showframe=False, showcoastlines=True, bgcolor='rgba(0,0,0,0)',
+                                                   landcolor='#16161a', lakecolor='#0c0c0d', coastlinecolor='#26262c',
+                                                   showland=True, showocean=True, oceancolor='#0c0c0d'),
+                                          paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#ececee'))
+                    st.plotly_chart(fig_map, use_container_width=True)
+
             st.divider()
         
         st.subheader(t("active_applications"))
@@ -3532,7 +3540,7 @@ def main():
                     ai_cfg = _ai_cfg_with_app_lang(load_config())
 
                     def _finalize_gen(profs):
-                        """归一化学校名 / QS / 国家 / 来源，写入预览。"""
+                        """归一化学校名 / QS / 国家 / 来源 + 校验主页真实性，写入预览。"""
                         for p in profs:
                             canon = canonical_school_name(str(p.get("学校名称", "")).strip())
                             p["学校名称"] = canon
@@ -3543,6 +3551,17 @@ def main():
                             elif not str(p.get("国家/地区", "")).strip():
                                 p["国家/地区"] = "未知"
                             p["来源"] = "AI 生成"
+                        # 校验每个主页是否真实存在、是否对得上老师（挡住 LLM 捏造链接）
+                        with st.spinner(ui("正在核验每位老师的主页是否真实存在……",
+                                           "Verifying each professor's homepage is real…")):
+                            items = [(i, str(p.get("主页链接", "")).strip(), p.get("导师/教授", ""))
+                                     for i, p in enumerate(profs)]
+                            verdicts = verify_homepages_bulk(items)
+                        for i, p in enumerate(profs):
+                            v = verdicts.get(i, {"status": "no_url", "ok": False, "reason": ""})
+                            p["_home_status"] = v.get("status", "no_url")
+                            p["_home_ok"] = bool(v.get("ok"))
+                            p["_home_reason"] = v.get("reason", "")
                         st.session_state["db_ai_preview"] = profs
 
                     provider_now = ai_cfg.get("ai_provider", "通义千问 (Qwen)")
@@ -3595,32 +3614,50 @@ def main():
             # 生成结果预览 + 确认导入
             _preview = st.session_state.get("db_ai_preview")
             if _preview:
-                _no_home = [p for p in _preview if not str(p.get("主页链接", "")).strip()]
-                st.success(ui(f"AI 共找到 {len(_preview)} 位老师，请确认后再导入。",
-                              f"AI found {len(_preview)} professors. Review before importing."))
-                if _no_home:
-                    st.warning(ui(f"其中 {len(_no_home)} 位没有主页链接（个人主页 / 学院教职页均未找到）。",
-                                  f"{len(_no_home)} of them have no homepage (neither personal nor faculty page)."))
+                _verified = [p for p in _preview if p.get("_home_ok")]
+                _bad = [p for p in _preview if not p.get("_home_ok")]
+                st.success(ui(f"AI 共找到 {len(_preview)} 位老师；主页核验通过 {len(_verified)} 位。",
+                              f"AI found {len(_preview)}; {len(_verified)} passed homepage verification."))
+                if _bad:
+                    st.warning(ui(
+                        f"⚠️ {len(_bad)} 位主页**未通过核验**（打不开 / 404 / 页面查无此人，很可能是 AI 捏造的链接），默认不勾选。",
+                        f"⚠️ {len(_bad)} have an UNVERIFIED homepage (unreachable / 404 / name not found — likely fabricated). Unchecked by default."))
+
+                # 校验状态 → 中文标签
+                _status_label = {
+                    "ok": ui("✅ 真实", "✅ Verified"),
+                    "name_mismatch": ui("❌ 查无此人", "❌ Name not found"),
+                    "unreachable": ui("❌ 打不开", "❌ Unreachable"),
+                    "no_url": ui("— 无主页", "— No URL"),
+                }
 
                 cselA, cselB = st.columns(2)
-                select_all = cselA.checkbox(ui("全选", "Select all"), value=True, key="db_ai_select_all")
-                only_home = cselB.checkbox(ui("仅选有主页链接的老师", "Only those with a homepage"),
-                                           value=bool(_no_home), key="db_ai_only_home")
+                select_all = cselA.checkbox(ui("全选", "Select all"), value=False, key="db_ai_select_all")
+                only_verified = cselB.checkbox(ui("仅选主页核验通过的老师", "Only homepage-verified professors"),
+                                               value=True, key="db_ai_only_verified")
 
-                # 每行默认是否勾选：全选 且（不限主页 或 该行有主页）
+                # 每行默认勾选：全选优先；否则按“仅核验通过”
                 _col_sel = ui("导入", "Import")
                 _col_home = ui("主页", "Homepage")
+                _col_chk = ui("主页核验", "Homepage check")
+
+                def _default_pick(p):
+                    if select_all:
+                        return True
+                    if only_verified:
+                        return bool(p.get("_home_ok"))
+                    return True
+
                 _prev_df = pd.DataFrame([{
-                    _col_sel: bool(select_all and (str(p.get("主页链接", "")).strip() or not only_home)),
+                    _col_sel: _default_pick(p),
                     ui("导师", "Professor"): p.get("导师/教授", ""),
                     ui("学校", "School"): p.get("学校名称", ""),
-                    ui("院系", "Dept"): p.get("院系", ""),
+                    _col_chk: _status_label.get(p.get("_home_status", "no_url"), p.get("_home_status", "")),
                     ui("研究方向", "Research"): p.get("研究方向", ""),
                     _col_home: p.get("主页链接", "") or "—",
                 } for p in _preview])
 
-                # key 随两个开关变化 → 切换全选/仅主页时用新默认值重建编辑器
-                _editor_key = f"db_ai_editor_{int(select_all)}_{int(only_home)}_{len(_preview)}"
+                _editor_key = f"db_ai_editor_{int(select_all)}_{int(only_verified)}_{len(_preview)}"
                 edited = st.data_editor(
                     _prev_df, use_container_width=True, hide_index=True, key=_editor_key,
                     column_config={
@@ -3628,7 +3665,7 @@ def main():
                         _col_home: st.column_config.LinkColumn(),
                         ui("导师", "Professor"): st.column_config.TextColumn(disabled=True),
                         ui("学校", "School"): st.column_config.TextColumn(disabled=True),
-                        ui("院系", "Dept"): st.column_config.TextColumn(disabled=True),
+                        _col_chk: st.column_config.TextColumn(disabled=True),
                         ui("研究方向", "Research"): st.column_config.TextColumn(disabled=True),
                     },
                 )
@@ -3644,16 +3681,18 @@ def main():
                     if not to_import:
                         st.warning(ui("请至少勾选一位老师。", "Please select at least one professor."))
                     else:
-                        new_db, _ = dedupe_db(load_db() + to_import)
+                        # 去掉内部校验字段再入库
+                        cleaned = [{k: v for k, v in p.items() if not k.startswith("_home_")} for p in to_import]
+                        new_db, _ = dedupe_db(load_db() + cleaned)
                         save_db(new_db)
-                        for _k in ("db_ai_preview", "db_ai_only_home", "db_ai_select_all"):
+                        for _k in ("db_ai_preview", "db_ai_only_verified", "db_ai_select_all"):
                             st.session_state.pop(_k, None)
                         st.session_state["db_bulk_import_toast"] = ui(
-                            f"已导入 {len(to_import)} 位，导师库现有 {len(new_db)} 位。",
-                            f"Imported {len(to_import)}; DB now has {len(new_db)} professors.")
+                            f"已导入 {len(cleaned)} 位，导师库现有 {len(new_db)} 位。",
+                            f"Imported {len(cleaned)}; DB now has {len(new_db)} professors.")
                         st.rerun()
                 if cimp2.button(ui("放弃这批结果", "Discard"), use_container_width=True, key="db_ai_import_discard"):
-                    for _k in ("db_ai_preview", "db_ai_only_home", "db_ai_select_all"):
+                    for _k in ("db_ai_preview", "db_ai_only_verified", "db_ai_select_all"):
                         st.session_state.pop(_k, None)
                     st.rerun()
 
@@ -4338,6 +4377,100 @@ def main():
                             st.session_state.pop("rv_delete_id", None)
                             st.session_state["rv_toast"] = ui("已删除面试回顾", "Review deleted")
                             st.rerun()
+
+    elif menu == clock_menu_label:
+        import pytz
+        from zoneinfo import ZoneInfo
+
+        st.title(ui("世界时钟", "World Clock"))
+        st.markdown(
+            f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>"
+            f"{ui('选择国家与城市，查看当地当前时间。', 'Pick a country and city to see its current local time.')}</p>",
+            unsafe_allow_html=True,
+        )
+        # 每 15 秒自动刷新，保证分钟跳动
+        st_autorefresh(interval=15000, key="world_clock_tick")
+
+        def _tz_city(tz_name):
+            return tz_name.split("/")[-1].replace("_", " ")
+
+        def _render_clock(tz_name, title):
+            try:
+                now = datetime.now(ZoneInfo(tz_name))
+            except Exception:
+                st.warning(ui(f"无法解析时区：{tz_name}", f"Unknown timezone: {tz_name}"))
+                return
+            date_str = now.strftime("%Y-%m-%d %a")
+            time_str = now.strftime("%H:%M")
+            offset = now.strftime("%z")
+            offset_fmt = f"UTC{offset[:3]}:{offset[3:]}" if offset else ""
+            st.markdown(
+                "<div style='padding:1rem 1.2rem;border:1px solid #26262c;border-radius:12px;"
+                "background:rgba(142,107,239,.06);'>"
+                f"<div style='color:#c9b8ff;font-size:20px;font-weight:700;line-height:1.25;'>{html.escape(title)}</div>"
+                f"<div style='color:#8e8e96;font-size:13px;margin-top:.25rem;'>{date_str} · {offset_fmt}</div>"
+                f"<div style='color:#ececee;font-size:44px;font-weight:700;line-height:1.1;"
+                f"font-variant-numeric:tabular-nums;margin-top:.2rem;'>{time_str}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # 国家（按名称排序）→ 城市（该国的 IANA 时区）
+        country_items = sorted(pytz.country_names.items(), key=lambda kv: kv[1])
+        country_codes = [code for code, _ in country_items if pytz.country_timezones.get(code)]
+        country_label = {code: pytz.country_names[code] for code in country_codes}
+        default_code = "US" if "US" in country_codes else country_codes[0]
+
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            sel_country = st.selectbox(
+                ui("国家 / 地区", "Country / Region"),
+                country_codes,
+                index=country_codes.index(default_code),
+                format_func=lambda c: country_label.get(c, c),
+                key="wc_country",
+            )
+        tz_list = pytz.country_timezones.get(sel_country, [])
+        with cc2:
+            sel_tz = st.selectbox(
+                ui("城市", "City"),
+                tz_list,
+                format_func=_tz_city,
+                key=f"wc_city_{sel_country}",
+            )
+
+        # 已添加的时钟列表（保存标题，避免删除国家后丢失显示名）
+        if "wc_added" not in st.session_state:
+            st.session_state["wc_added"] = []  # [{"tz":..., "title":...}]
+
+        if sel_tz:
+            sel_title = f"{country_label.get(sel_country, sel_country)} · {_tz_city(sel_tz)}"
+            prev_col, btn_col = st.columns([4, 1], vertical_alignment="center")
+            with prev_col:
+                _render_clock(sel_tz, sel_title)
+            with btn_col:
+                _already = any(x.get("tz") == sel_tz for x in st.session_state["wc_added"])
+                if st.button(ui("＋ 添加", "＋ Add"), key="wc_add_btn",
+                             use_container_width=True, disabled=_already,
+                             help=ui("已在下方列表", "Already added") if _already else None):
+                    st.session_state["wc_added"].append({"tz": sel_tz, "title": sel_title})
+                    st.rerun()
+
+        st.divider()
+        st.markdown(f"##### {ui('我的世界时钟', 'My World Clocks')}")
+        added = st.session_state["wc_added"]
+        if not added:
+            st.info(ui("上面选好国家与城市，点「＋ 添加」把时钟固定到这里。",
+                       "Pick a country and city above, then click ＋ Add to pin a clock here."))
+        else:
+            cols = st.columns(min(3, len(added)))
+            for i, item in enumerate(added):
+                with cols[i % len(cols)]:
+                    _render_clock(item.get("tz", ""), item.get("title", item.get("tz", "")))
+                    if st.button(ui("移除", "Remove"), key=f"wc_rm_{i}_{item.get('tz','')}",
+                                 use_container_width=True):
+                        st.session_state["wc_added"].pop(i)
+                        st.rerun()
 
     elif menu == settings_menu_label:
         st.title(settings_menu_label)

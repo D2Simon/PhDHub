@@ -12,6 +12,10 @@ from openai import OpenAI
 
 _GEMINI_MODEL = "gemini-2.5-flash"
 _CLAUDE_MODEL = "claude-opus-4-8"
+# 这个中转站强制开启扩展思考(thinking)，会吃掉不少输出预算；Anthropic 协议又必须显式给
+# max_tokens（不能省略/设 0）。所以给一个足够大的上限，让 thinking 用掉一部分后，正式
+# JSON 输出仍有充足空间。
+_CLAUDE_MAX_OUTPUT_TOKENS = 32000
 _CLAUDE_DEFAULT_BASE_URL = "https://capi.aerolink.lat/"
 
 
@@ -67,10 +71,10 @@ def _call_claude_native(prompt, api_key, base, model, temperature, max_tokens, p
     if prefill:
         messages.append({"role": "assistant", "content": prefill})
 
-    def _do_request(disable_thinking):
+    def _do_request(disable_thinking, mtok):
         payload = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": mtok,
             "temperature": temperature,
             "messages": messages,
         }
@@ -82,28 +86,38 @@ def _call_claude_native(prompt, api_key, base, model, temperature, max_tokens, p
         req.add_header("x-api-key", api_key)
         req.add_header("Authorization", f"Bearer {api_key}")  # 部分中转站认这个头
         req.add_header("anthropic-version", "2023-06-01")
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             return resp.read().decode("utf-8", "ignore")
 
-    try:
-        raw = _do_request(disable_thinking=True)
-    except urllib.error.HTTPError as e:
-        # 某些中转站不认 thinking 参数 → 400，去掉该参数重试一次
-        if e.code == 400:
-            try:
-                raw = _do_request(disable_thinking=False)
-            except urllib.error.HTTPError as e2:
-                try:
-                    detail = e2.read().decode("utf-8", "ignore")[:300]
-                except Exception:
-                    detail = ""
-                raise RuntimeError(f"HTTP {e2.code} {detail}".strip()) from None
-        else:
-            try:
-                detail = e.read().decode("utf-8", "ignore")[:300]
-            except Exception:
-                detail = ""
-            raise RuntimeError(f"HTTP {e.code} {detail}".strip()) from None
+    def _http_detail(err):
+        try:
+            return err.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            return ""
+
+    # 依次尝试：关思考 → 不关思考 → 降低 max_tokens（有些中转站嫌 32k 太大而 400）
+    attempts = [
+        (True, max_tokens),
+        (False, max_tokens),
+        (False, min(max_tokens, 8000)),
+        (False, min(max_tokens, 4096)),
+    ]
+    raw = None
+    last_err = ""
+    for disable_thinking, mtok in attempts:
+        try:
+            raw = _do_request(disable_thinking, mtok)
+            break
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code} {_http_detail(e)}".strip()
+            if e.code == 400:
+                continue  # 参数问题：换下一组再试
+            raise RuntimeError(last_err) from None
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            continue
+    if raw is None:
+        raise RuntimeError(last_err or "请求失败") from None
     try:
         data = json.loads(raw)
     except Exception:
@@ -134,7 +148,7 @@ def _call_claude_openai(prompt, api_key, base, model, temperature, max_tokens, p
     return (prefill + text).strip() if prefill and not text.lstrip().startswith(prefill.strip()) else text
 
 
-def _call_claude(prompt, config, temperature=0.3, max_tokens=8000, prefill=""):
+def _call_claude(prompt, config, temperature=0.3, max_tokens=_CLAUDE_MAX_OUTPUT_TOKENS, prefill=""):
     """调用 Anthropic 兼容中转站（如 capi.aerolink.lat）。
 
     优先用原生 /v1/messages（对应 CC 的 ANTHROPIC_BASE_URL，最稳）；
@@ -157,7 +171,7 @@ def _call_claude(prompt, config, temperature=0.3, max_tokens=8000, prefill=""):
     return False, f"{model} — " + " | ".join(errors)
 
 
-def _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
+def _stream_claude(prompt, config, temperature=0.3, max_tokens=_CLAUDE_MAX_OUTPUT_TOKENS):
     """流式调用中转站原生 /v1/messages（SSE）。逐段 yield 增量文本。
 
     若中转站不支持流式 / 出错，抛异常由上层回退到非流式。
@@ -1055,9 +1069,12 @@ def build_professor_gen_prompt(direction, regions, count, extra):
 
     return f"""你是一个学术导师信息整理助手。请根据「我的需求」，整理一份真实存在的导师名单。
 
+## 最重要的规则
+- 你**没有联网 / 浏览 / 工具调用能力**，无法“去核实”“去查看链接”。请**直接凭你已有的知识**回答，不要说“让我先核实”“我先看看能不能访问”之类的话。
+- 你的**整条回复必须就是那个 JSON 对象本身**：第一个字符是 `{{`，最后一个字符是 `}}`。除此之外一个字都不要写。
+
 ## 输出格式（必须严格遵守）
-- 你的回复必须以 `{{` 开头、以 `}}` 结尾，整条回复本身就是一个合法 JSON 对象。
-- 绝对不要输出任何解释、前言、结语、markdown 代码块围栏（不要 ```），不要说“好的”“以下是”之类的话。
+- 绝对不要输出任何解释、前言、结语、markdown 代码块围栏（不要 ```），不要说“好的”“以下是”“让我核实”之类的话。
 - 顶层是对象，唯一键为 "professors"，值为导师对象数组：{{ "professors": [ {{…}}, … ] }}
 - 控制数量以确保 JSON 完整闭合、不被截断；宁可少列几位也不要中途断开。
 - 每个导师对象必须包含下列全部字段，键名一字不差（都是中文键名）：
@@ -1066,7 +1083,7 @@ def build_professor_gen_prompt(direction, regions, count, extra):
   - 导师邮箱 ：不确定就留空字符串 ""，不要编造。
   - 国家/地区 ：学校所在国家/地区英文名，如 United States、United Kingdom、Hong Kong；不确定填 "未知"。
   - 院系 ：学院/系，如 Computer Science；不确定填 ""。
-  - 主页链接 ：**必填，不能留空**。完整 URL（http/https 开头）。优先给老师的**个人主页 / 实验室主页**；若确实没有个人主页，则给该校院系官网上他的**教职 / 员工 (faculty / people / staff) 介绍页**。这两类页面基本人人都有，务必给出一个真实可访问的链接，绝不编造。
+  - 主页链接 ：**必填，不能留空**。完整 URL（http/https 开头）。优先给老师的**个人主页 / 实验室主页**；若你不确定其个人主页地址，就给该校院系官网上他的**教职 / 员工 (faculty / people / staff) 介绍页**。**只填你有把握真实存在、且确实属于这位老师的 URL**——你记不准确切网址时，宁可给该校该院系“教职员工列表”这类稳定页面，也**绝对不要臆造 / 拼凑一个看起来像模像样但其实不存在的地址**。（导入前会由系统抓取核对，编造的链接会被自动剔除；但这不需要你做任何核实动作，你只管凭记忆给出最可靠的 URL。）
   - 研究方向 ：几个关键词用逗号分隔；不确定填 "未明确"。
   - 推荐级 ：只能是 "T0" / "T1" / "T2"，默认 "T1"。
   - 阶段 ：一律填 "未联系"。
@@ -1162,7 +1179,7 @@ def stream_professor_list(direction, regions, count, extra, config):
     prompt = build_professor_gen_prompt(direction, regions, count, extra)
     acc = ""
     try:
-        for delta in _stream_claude(prompt, config, temperature=0.3, max_tokens=8000):
+        for delta in _stream_claude(prompt, config, temperature=0.3, max_tokens=_CLAUDE_MAX_OUTPUT_TOKENS):
             acc += delta
             # 边收边尝试解析，给出“已找到 N 位”的实时计数（失败就先按 0）
             ok, rows, _ = parse_professor_payload(acc)
@@ -1182,9 +1199,90 @@ def generate_professor_list(direction, regions, count, extra, config):
     provider = (config or {}).get("ai_provider", "通义千问 (Qwen)")
     if provider == "Claude (中转)":
         # 该中转站不接受 assistant 预填，也对超大 max_tokens 敏感 → 用普通请求 + 提示词强约束。
-        ok, text = _call_claude(prompt, config, temperature=0.3, max_tokens=8000)
+        ok, text = _call_claude(prompt, config, temperature=0.3, max_tokens=_CLAUDE_MAX_OUTPUT_TOKENS)
     else:
         ok, text = _call_llm(prompt, config, temperature=0.3)
     if not ok:
         return False, [], text
     return parse_professor_payload(text)
+
+
+# ==========================================================================
+# 主页真实性校验：抓取 URL，确认能访问且页面出现该老师姓名（挡住 LLM 捏造链接）
+# ==========================================================================
+
+def _name_tokens(name):
+    """把姓名拆成用于匹配的 token（英文按空格分词，去掉头衔/缩写点）。"""
+    raw = str(name or "").strip()
+    if not raw:
+        return []
+    cleaned = re.sub(r"[.,]", " ", raw)
+    parts = [t for t in re.split(r"\s+", cleaned) if len(t) >= 2]
+    # 去掉常见头衔
+    stop = {"dr", "prof", "professor", "mr", "ms", "mrs"}
+    return [t for t in parts if t.lower() not in stop]
+
+
+def verify_homepage_reality(url, prof_name, timeout=8):
+    """抓取主页并核对是否真实、是否对得上这位老师。
+
+    返回 dict：{status, ok, reason}
+      status: "ok" 页面可访问且出现老师姓名
+              "name_mismatch" 页面能打开但没出现老师名字（很可能是捏造/贴错）
+              "unreachable" 打不开 / 404 / 超时（链接可能是编的）
+              "no_url" 没有链接
+    """
+    u = str(url or "").strip()
+    if not u:
+        return {"status": "no_url", "ok": False, "reason": "无链接"}
+    if not u.lower().startswith(("http://", "https://")):
+        return {"status": "unreachable", "ok": False, "reason": "URL 格式无效"}
+    req = urllib.request.Request(u, headers={"User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = getattr(resp, "status", 200) or 200
+            html = resp.read(600000).decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as e:
+        return {"status": "unreachable", "ok": False, "reason": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"status": "unreachable", "ok": False, "reason": f"打不开：{type(e).__name__}"}
+    if code >= 400:
+        return {"status": "unreachable", "ok": False, "reason": f"HTTP {code}"}
+    # 提取纯文本
+    text = re.sub(r"<style.*?>.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<script.*?>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text_low = re.sub(r"\s+", " ", text).strip().lower()
+    tokens = _name_tokens(prof_name)
+    if not tokens:
+        # 无法核名，只能确认可访问
+        return {"status": "ok", "ok": True, "reason": "可访问（无姓名可核对）"}
+    # 姓 + 名 至少各命中一个（对中文名整体匹配）
+    hits = sum(1 for t in tokens if t.lower() in text_low)
+    surname_hit = tokens[-1].lower() in text_low  # 英文姓通常是最后一段
+    if hits >= 2 or (len(tokens) == 1 and hits >= 1) or (surname_hit and hits >= 1):
+        return {"status": "ok", "ok": True, "reason": "页面出现老师姓名"}
+    return {"status": "name_mismatch", "ok": False, "reason": "页面未出现老师姓名"}
+
+
+def verify_homepages_bulk(items, max_workers=8, timeout=8):
+    """并发校验多位老师的主页。items: [(index, url, prof_name), ...]
+
+    返回 {index: 校验dict}。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = {}
+    if not items:
+        return results
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        fut_map = {ex.submit(verify_homepage_reality, url, name, timeout): idx
+                   for idx, url, name in items}
+        for fut in as_completed(fut_map):
+            idx = fut_map[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as e:
+                results[idx] = {"status": "unreachable", "ok": False, "reason": f"{type(e).__name__}"}
+    return results

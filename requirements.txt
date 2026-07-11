@@ -4,6 +4,7 @@ google-generativeai
 pandas
 plotly
 pycountry
+pytz
 streamlit-autorefresh
 requests
 PyMuPDF
