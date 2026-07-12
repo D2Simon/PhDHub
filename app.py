@@ -51,7 +51,11 @@ from phdhub.interview_prep import (
 from phdhub.resume_store import add_resume, delete_resume, get_resume, list_resumes
 from phdhub.rp_store import add_rp, delete_rp, get_rp, list_rps
 from phdhub.resume_utils import build_pdf_thumbnail_png
-from phdhub.stats import get_email_stats_from_emails, get_recent_7d_email_stats_from_emails
+from phdhub.stats import (
+    get_daily_sent_inquiries_from_emails,
+    get_email_stats_from_emails,
+    get_recent_7d_email_stats_from_emails,
+)
 from phdhub.storage import (
     load_config,
     load_db,
@@ -517,6 +521,14 @@ def get_total_email_stats():
         emails = []
     emails = list(emails) + load_lite_emails()
     return get_email_stats_from_emails(emails)
+
+
+def get_recent_7d_sent_inquiry_daily():
+    success, emails = get_cached_emails(limit=5000)
+    if not success:
+        emails = []
+    emails = list(emails) + load_lite_emails()
+    return get_daily_sent_inquiries_from_emails(emails, recent_days=7)
 
 
 def get_recent_7d_scheduled_interviews_count():
@@ -2269,16 +2281,12 @@ def main():
             df['创建日期'] = pd.to_datetime(df['创建时间']).dt.date
             recent_df = df[df['创建日期'] > seven_days_ago.date()]
             
-            # Chart 1: 7-day creations
-            daily_creates = recent_df.groupby('创建日期').size().reset_index(name='发信数量')
-            # Fill missing dates
-            date_range = pd.date_range(end=today.date(), periods=7).date
-            daily_creates = daily_creates.set_index('创建日期').reindex(date_range, fill_value=0).reset_index()
-            daily_creates.rename(columns={'创建日期': '日期'}, inplace=True)
-            if 'index' in daily_creates.columns:
-                daily_creates.rename(columns={'index': '日期'}, inplace=True)
+            # Chart 1: actual sent-inquiry dates, matching the metric above.
+            daily_creates = pd.DataFrame(get_recent_7d_sent_inquiry_daily())
             
-            fig_bar = px.bar(daily_creates, x='日期', y='发信数量', title="最近 7 天套瓷发送数量 (按创建时间)",
+            fig_bar = px.bar(daily_creates, x='日期', y='发信数量',
+                             title=ui("最近 7 天套瓷发送数量（按邮件日期）",
+                                      "Outreach emails sent in the last 7 days (by email date)"),
                              color_discrete_sequence=['#8e6bef'], text='发信数量')
             fig_bar.update_layout(xaxis_title="日期", yaxis_title="发信数量", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                                   font=dict(color='#ececee'))
