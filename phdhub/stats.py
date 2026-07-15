@@ -4,6 +4,19 @@ from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 
+INTERVIEW_COUNTED_STAGES = frozenset({"面试预约阶段", "面试结束阶段", "口头offer"})
+
+
+def is_interview_counted_stage(stage):
+    """Return whether a CRM stage means the professor reached interview."""
+    return str(stage or "").strip() in INTERVIEW_COUNTED_STAGES
+
+
+def count_interviewed_professors(rows):
+    """Count professors who are at interview or a later successful stage."""
+    return sum(1 for row in rows or [] if is_interview_counted_stage(row.get("阶段")))
+
+
 def get_email_stats_from_emails(emails, recent_days=None):
     stats = {
         "sent_inquiry": 0,

@@ -52,6 +52,8 @@ from phdhub.resume_store import add_resume, delete_resume, get_resume, list_resu
 from phdhub.rp_store import add_rp, delete_rp, get_rp, list_rps
 from phdhub.resume_utils import build_pdf_thumbnail_png
 from phdhub.stats import (
+    INTERVIEW_COUNTED_STAGES,
+    count_interviewed_professors,
     get_daily_sent_inquiries_from_emails,
     get_email_stats_from_emails,
     get_recent_7d_email_stats_from_emails,
@@ -531,15 +533,16 @@ def get_recent_7d_sent_inquiry_daily():
     return get_daily_sent_inquiries_from_emails(emails, recent_days=7)
 
 
-def get_recent_7d_scheduled_interviews_count():
+def get_recent_7d_stage_count(stages):
     db = load_db()
     if not db:
         return 0
+    counted_stages = set(stages)
     today = datetime.now().date()
     window_start = today - timedelta(days=6)
     count = 0
     for row in db:
-        if row.get("阶段") != "面试预约阶段":
+        if row.get("阶段") not in counted_stages:
             continue
         raw = str(row.get("更新时间", "")).strip()
         if not raw:
@@ -554,6 +557,10 @@ def get_recent_7d_scheduled_interviews_count():
         if parsed and window_start <= parsed.date() <= today:
             count += 1
     return count
+
+
+def get_recent_7d_interviews_count():
+    return get_recent_7d_stage_count(INTERVIEW_COUNTED_STAGES)
 
 
 @st.cache_data(ttl=60)
@@ -2217,8 +2224,11 @@ def main():
         
         recent_stats = get_recent_7d_email_stats()
         total_stats = get_total_email_stats()
-        recent_scheduled_count = get_recent_7d_scheduled_interviews_count()
-        interview_scheduled_total = len([r for r in load_db() if r.get("阶段") == "面试预约阶段"])
+        dashboard_db = load_db()
+        recent_interview_count = get_recent_7d_interviews_count()
+        recent_verbal_offer_count = get_recent_7d_stage_count(["口头offer"])
+        interview_total = count_interviewed_professors(dashboard_db)
+        verbal_offer_total = sum(1 for row in dashboard_db if row.get("阶段") == "口头offer")
 
         def _stat_box(label, items):
             spans = "".join(f"<span style='color:{c}'>{txt} {val}</span>" for txt, val, c in items)
@@ -2229,11 +2239,12 @@ def main():
                 "</div>"
             )
 
-        def _outreach_box(stats, scheduled):
+        def _outreach_box(stats, interviews, verbal_offers):
             return _stat_box(ui("套瓷进度", "Outreach"), [
                 (ui("已发送", "Sent"), stats["sent_inquiry"], "#a78bfa"),
                 (ui("已回复", "Replied"), stats["replied_total"], "#ececee"),
-                (ui("面试", "Interview"), scheduled, "#56d197"),
+                (ui("面试", "Interview"), interviews, "#56d197"),
+                (ui("口头 offer", "Verbal offer"), verbal_offers, "#fbbf24"),
             ])
 
         def _reply_box(stats):
@@ -2249,7 +2260,7 @@ def main():
             st.markdown(f"### {ui('最近 7 天套瓷沟通指标', 'Last 7 Days Outreach Metrics')}")
             rc = st.columns(2)
             with rc[0]:
-                st.markdown(_outreach_box(recent_stats, recent_scheduled_count), unsafe_allow_html=True)
+                st.markdown(_outreach_box(recent_stats, recent_interview_count, recent_verbal_offer_count), unsafe_allow_html=True)
             with rc[1]:
                 st.markdown(_reply_box(recent_stats), unsafe_allow_html=True)
 
@@ -2257,7 +2268,7 @@ def main():
             st.markdown(f"### {ui('累计套瓷沟通指标', 'All-Time Outreach Metrics')}")
             ac = st.columns(2)
             with ac[0]:
-                st.markdown(_outreach_box(total_stats, interview_scheduled_total), unsafe_allow_html=True)
+                st.markdown(_outreach_box(total_stats, interview_total, verbal_offer_total), unsafe_allow_html=True)
             with ac[1]:
                 st.markdown(_reply_box(total_stats), unsafe_allow_html=True)
         st.divider()
@@ -2373,10 +2384,10 @@ def main():
         ACTIVE_STAGES = ["已发首封邮件", "收到积极回复", "收到中等回复", "收到消极回复",
                          "面试预约阶段", "面试结束阶段", "口头offer", "终止状态"]
         STAGE_GROUPS = {
-            ui("📨 首封邮件", "📨 First email"): ["已发首封邮件"],
-            ui("💬 收到回复", "💬 Got reply"): ["收到积极回复", "收到中等回复", "收到消极回复"],
-            ui("🎤 面试环节", "🎤 Interview"): ["面试预约阶段", "面试结束阶段"],
-            ui("🎉 口头 offer", "🎉 Verbal offer"): ["口头offer"],
+            ui("首封邮件", "First email"): ["已发首封邮件"],
+            ui("收到回复", "Got reply"): ["收到积极回复", "收到中等回复", "收到消极回复"],
+            ui("面试环节", "Interview"): ["面试预约阶段", "面试结束阶段"],
+            ui("口头 offer", "Verbal offer"): ["口头offer"],
             ui("终止", "Terminated"): ["终止状态"],
         }
         STAGE_EN = {
