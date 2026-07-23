@@ -11,6 +11,7 @@ from .constants import (
     INTERVIEW_REVIEWS_FILE,
     LITE_EMAILS_FILE,
     TEMPLATES_FILE,
+    VERBAL_OFFERS_FILE,
 )
 
 
@@ -69,3 +70,13 @@ def load_interview_reviews():
 
 def save_interview_reviews(data):
     _write_json(INTERVIEW_REVIEWS_FILE, data, indent=4, ensure_ascii=False)
+
+
+def load_verbal_offers():
+    """User-managed verbal offer milestones."""
+    data = _read_json(VERBAL_OFFERS_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_verbal_offers(data):
+    _write_json(VERBAL_OFFERS_FILE, data, indent=4, ensure_ascii=False)
