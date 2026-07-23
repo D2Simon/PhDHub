@@ -69,6 +69,8 @@ from phdhub.storage import (
     save_interview_reviews,
     save_lite_emails,
     save_templates,
+    load_verbal_offers,
+    save_verbal_offers,
 )
 from phdhub.timezone_utils import format_local_time
 from phdhub.university import (
@@ -1759,6 +1761,332 @@ def show_professor_details(row):
 # ==========================================
 # 主界面构建
 # ==========================================
+def _offer_date(value, fallback):
+    """Parse a stored ISO date for Streamlit's date input."""
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_offer_link(value):
+    """Make a manually entered application link usable by link_button."""
+    link = str(value or "").strip()
+    if link and not re.match(r"^https?://", link, flags=re.IGNORECASE):
+        link = f"https://{link}"
+    return link
+
+
+@st.dialog("编辑口头 Offer / Edit Verbal Offer", width="large")
+def edit_verbal_offer_dialog(record_id):
+    offers = load_verbal_offers()
+    position = next(
+        (i for i, item in enumerate(offers) if str(item.get("id", "")) == str(record_id)),
+        None,
+    )
+    if position is None:
+        st.error(_ui_local("找不到这条记录。", "This record could not be found."))
+        return
+
+    offer = offers[position]
+    today = datetime.now().date()
+    st.markdown(
+        f"### {offer.get('导师/教授', _ui_local('未知导师', 'Unknown professor'))}"
+    )
+    st.caption(str(offer.get("学校名称", _ui_local("未知学校", "Unknown university"))))
+
+    edit_columns = st.columns(3)
+    with edit_columns[0]:
+        edited_deadline = st.date_input(
+            _ui_local("申请截止日期", "Application deadline"),
+            value=_offer_date(offer.get("申请截止日期"), today),
+            key=f"dialog_deadline_{record_id}",
+        )
+    with edit_columns[1]:
+        edited_result = st.date_input(
+            _ui_local("结果公布日期", "Result announcement"),
+            value=_offer_date(offer.get("结果公布日期"), today + timedelta(days=30)),
+            key=f"dialog_result_{record_id}",
+        )
+    with edit_columns[2]:
+        enrollment_is_unknown = not str(offer.get("预计入学时间", "")).strip()
+        edited_enrollment = st.date_input(
+            _ui_local("预计入学时间", "Estimated enrollment"),
+            value=_offer_date(offer.get("预计入学时间"), today + timedelta(days=180)),
+            disabled=st.session_state.get(
+                f"dialog_enrollment_unknown_{record_id}",
+                enrollment_is_unknown,
+            ),
+            key=f"dialog_enrollment_{record_id}",
+        )
+        edited_enrollment_unknown = st.checkbox(
+            _ui_local("暂时不知道", "Unknown"),
+            value=enrollment_is_unknown,
+            key=f"dialog_enrollment_unknown_{record_id}",
+        )
+
+    edited_application_link = st.text_input(
+        _ui_local("申请链接", "Application link"),
+        value=str(offer.get("申请链接", "") or ""),
+        placeholder="https://apply.example.edu",
+        key=f"dialog_application_link_{record_id}",
+    )
+    save_col, delete_col = st.columns([3, 1])
+    with save_col:
+        if st.button(
+            _ui_local("保存修改", "Save changes"),
+            type="primary",
+            use_container_width=True,
+            key=f"dialog_save_offer_{record_id}",
+        ):
+            offers[position].update({
+                "申请截止日期": edited_deadline.isoformat(),
+                "结果公布日期": edited_result.isoformat(),
+                "预计入学时间": "" if edited_enrollment_unknown else edited_enrollment.isoformat(),
+                "申请链接": _normalize_offer_link(edited_application_link),
+                "更新时间": datetime.now().isoformat(timespec="seconds"),
+            })
+            save_verbal_offers(offers)
+            st.rerun()
+    with delete_col:
+        if st.button(
+            _ui_local("删除", "Delete"),
+            use_container_width=True,
+            key=f"dialog_delete_offer_{record_id}",
+        ):
+            offers.pop(position)
+            save_verbal_offers(offers)
+            st.rerun()
+
+
+def render_verbal_offer_manager(ui):
+    """Create and maintain verbal-offer milestone records."""
+    st.title(ui("口头 Offer 管理", "Verbal Offer Manager"))
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stFormSubmitButton"] button[kind="primary"] p {
+            color: #ffffff !important;
+            font-weight: 750 !important;
+            letter-spacing: 0.01em;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        ui(
+            "从导师库选择老师，学校会自动带出；申请截止、结果公布和预计入学日期均由你手动设置。",
+            "Pick a professor from your database. Their university is filled automatically, while all three dates remain under your control.",
+        )
+    )
+
+    today = datetime.now().date()
+    offers = load_verbal_offers()
+    saved_keys = {
+        (str(item.get("导师/教授", "")).strip(), str(item.get("学校名称", "")).strip())
+        for item in offers
+    }
+    professor_db = load_db()
+    offer_stage_professors = [
+        row for row in professor_db
+        if str(row.get("导师/教授", "")).strip()
+        and str(row.get("阶段", "")).strip().lower() == "口头offer"
+    ]
+    valid_professors = [
+        row for row in offer_stage_professors
+        if (
+            str(row.get("导师/教授", "")).strip(),
+            str(row.get("学校名称", "")).strip(),
+        ) not in saved_keys
+    ]
+
+    if valid_professors:
+        options = list(range(len(valid_professors)))
+        selected_index = st.selectbox(
+            ui("选择导师", "Professor"),
+            options,
+            format_func=lambda i: (
+                f"{valid_professors[i].get('导师/教授', '?')} · "
+                f"{valid_professors[i].get('学校名称', ui('未知学校', 'Unknown university'))}"
+            ),
+            key="offer_professor_picker",
+        )
+        selected_professor = valid_professors[selected_index]
+        selected_school = str(selected_professor.get("学校名称", "")).strip() or ui("未知学校", "Unknown university")
+        st.text_input(
+            ui("对应学校（自动带出）", "University (auto-filled)"),
+            value=selected_school,
+            disabled=True,
+            key=f"offer_school_{selected_index}",
+        )
+
+        with st.form("new_verbal_offer_form", clear_on_submit=False):
+            date_columns = st.columns(3)
+            with date_columns[0]:
+                application_deadline = st.date_input(
+                    ui("申请截止日期", "Application deadline"),
+                    value=today,
+                )
+            with date_columns[1]:
+                result_date = st.date_input(
+                    ui("结果公布日期", "Result announcement"),
+                    value=today + timedelta(days=30),
+                )
+            with date_columns[2]:
+                enrollment_date_col, enrollment_unknown_col = st.columns([2.15, 1])
+                with enrollment_unknown_col:
+                    st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+                    enrollment_unknown = st.checkbox(
+                        ui("暂时不知道", "Unknown"),
+                        key="new_offer_enrollment_unknown",
+                    )
+                with enrollment_date_col:
+                    enrollment_date = st.date_input(
+                        ui("预计入学时间", "Estimated enrollment"),
+                        value=today + timedelta(days=180),
+                        disabled=enrollment_unknown,
+                    )
+            application_link = st.text_input(
+                ui("申请链接", "Application link"),
+                placeholder="https://apply.example.edu",
+                help=ui(
+                    "填写学校或项目的在线申请页面，保存后会显示为按钮。",
+                    "Enter the university or program application page. It will appear as a button after saving.",
+                ),
+            )
+            add_offer = st.form_submit_button(
+                ui("保存口头 Offer", "Save verbal offer"),
+                type="primary",
+                use_container_width=True,
+            )
+
+        if add_offer:
+            professor_name = str(selected_professor.get("导师/教授", "")).strip()
+            offers.append({
+                "id": uuid.uuid4().hex,
+                "导师/教授": professor_name,
+                "学校名称": selected_school,
+                "申请截止日期": application_deadline.isoformat(),
+                "结果公布日期": result_date.isoformat(),
+                "预计入学时间": "" if enrollment_unknown else enrollment_date.isoformat(),
+                "申请链接": _normalize_offer_link(application_link),
+                "创建时间": datetime.now().isoformat(timespec="seconds"),
+                "更新时间": datetime.now().isoformat(timespec="seconds"),
+            })
+            save_verbal_offers(offers)
+            st.success(ui("口头 Offer 已保存。", "Verbal offer saved."))
+            st.rerun()
+    elif offer_stage_professors:
+        st.info(
+            ui(
+                "所有处于「口头 Offer」阶段的导师都已经添加在下方。",
+                "All professors at the Verbal Offer stage are already listed below.",
+            )
+        )
+    elif professor_db:
+        st.info(
+            ui(
+                "导师库中暂时没有处于「口头 Offer」阶段的老师。请先更新导师状态。",
+                "No professor is currently at the Verbal Offer stage. Update a professor's status first.",
+            )
+        )
+    else:
+        st.info(
+            ui(
+                "导师库还是空的。请先到「导师库管理」添加老师，再回来记录口头 Offer。",
+                "Your professor database is empty. Add a professor there before recording a verbal offer.",
+            )
+        )
+
+    offers = load_verbal_offers()
+    st.divider()
+    st.subheader(ui(f"已记录的 Offer（{len(offers)}）", f"Saved offers ({len(offers)})"))
+    if not offers:
+        st.info(
+            ui(
+                "还没有记录。选择导师并设置日期后，点击上方按钮保存。",
+                "No offers yet. Pick a professor, set the dates, and save your first record.",
+            )
+        )
+        return
+
+    added_ids = False
+    for offer in offers:
+        if not str(offer.get("id", "")).strip():
+            offer["id"] = uuid.uuid4().hex
+            added_ids = True
+    if added_ids:
+        save_verbal_offers(offers)
+
+    per_row = 3
+    for row_start in range(0, len(offers), per_row):
+        card_columns = st.columns(per_row)
+        for offset in range(per_row):
+            position = row_start + offset
+            if position >= len(offers):
+                break
+            offer = offers[position]
+            record_id = str(offer["id"])
+            professor_name = str(
+                offer.get("导师/教授", ui("未知导师", "Unknown professor"))
+            )
+            school_name = str(
+                offer.get("学校名称", ui("未知学校", "Unknown university"))
+            )
+            enrollment_text = (
+                str(offer.get("预计入学时间", "")).strip()
+                or ui("暂时不知道", "Not known yet")
+            )
+            saved_application_link = _normalize_offer_link(offer.get("申请链接", ""))
+
+            with card_columns[offset]:
+                with st.container(border=True):
+                    st.markdown(f"#### {html.escape(professor_name)}")
+                    st.markdown(
+                        "<div style='display:inline-flex;align-items:center;margin:.05rem 0 .8rem;"
+                        "padding:.3rem .65rem;border-radius:.55rem;"
+                        "background:rgba(96,165,250,.16);border:1px solid rgba(96,165,250,.42);"
+                        "color:#bfdbfe;font-weight:700;line-height:1.35;'>"
+                        f"{html.escape(school_name)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f"**{ui('申请截止', 'Deadline')}**  \n"
+                        f"{offer.get('申请截止日期', '—') or '—'}"
+                    )
+                    st.markdown(
+                        f"**{ui('结果公布', 'Result')}**  \n"
+                        f"{offer.get('结果公布日期', '—') or '—'}"
+                    )
+                    st.markdown(
+                        f"**{ui('预计入学', 'Enrollment')}**  \n"
+                        f"{enrollment_text}"
+                    )
+                    action_columns = st.columns(2)
+                    with action_columns[0]:
+                        if saved_application_link:
+                            st.link_button(
+                                ui("申请页面", "Apply"),
+                                saved_application_link,
+                                use_container_width=True,
+                            )
+                        else:
+                            st.button(
+                                ui("暂无链接", "No link"),
+                                disabled=True,
+                                use_container_width=True,
+                                key=f"offer_no_link_{record_id}",
+                            )
+                    with action_columns[1]:
+                        if st.button(
+                            ui("编辑", "Edit"),
+                            use_container_width=True,
+                            key=f"edit_offer_card_{record_id}",
+                        ):
+                            edit_verbal_offer_dialog(record_id)
+
+
 def main():
     ui = lambda zh, en: en if st.session_state.get("app_lang", "zh-CN") == "en" else zh
 
@@ -1815,6 +2143,7 @@ def main():
         data_mgmt_label = ui("资料管理", "Data Management")
         templates_menu_label = ui("套瓷信模版", "Cold-Email Templates")
         review_menu_label = ui("面试回顾", "Interview Review")
+        verbal_offer_menu_label = ui("口头 Offer 管理", "Verbal Offer Manager")
         clock_menu_label = ui("世界时钟", "World Clock")
         schoollist_menu_label = ui("院校榜单", "School List")
 
@@ -1828,15 +2157,16 @@ def main():
             "templates": templates_menu_label,
             "interview": t("menu_interview"),
             "review": review_menu_label,
+            "offers": verbal_offer_menu_label,
             "clock": clock_menu_label,
             "schoollist": schoollist_menu_label,
             "settings": settings_menu_label,
             "data": data_mgmt_label,
         }
         if lite_mode:
-            page_ids = ["dashboard", "email", "db", "templates", "review", "clock", "schoollist", "settings", "data"]
+            page_ids = ["dashboard", "email", "db", "templates", "offers", "review", "clock", "schoollist", "settings", "data"]
         else:
-            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "interview", "review", "clock", "schoollist", "settings"]
+            page_ids = ["resume", "rp", "dashboard", "email", "db", "templates", "offers", "interview", "review", "clock", "schoollist", "settings"]
 
         # 清理早期版本可能残留的旧导航 key（其值可能是标签而非页面 id）
         for _stale in ("nav_radio_lite", "nav_radio_full"):
@@ -1856,7 +2186,10 @@ def main():
         menu = label_map[menu_id]
 
     # 主体内容
-    if menu == resume_menu_label:
+    if menu == verbal_offer_menu_label:
+        render_verbal_offer_manager(ui)
+
+    elif menu == resume_menu_label:
         st.title(ui("我的简历", "My Resume"))
         st.markdown(f"<p style='color: #9b9ba3; margin-bottom: 1rem;'>{ui('上传 PDF 后将自动保存、自动设为当前简历并自动分析。', 'After PDF upload, it is saved automatically, set as active, and analyzed by AI.')}</p>", unsafe_allow_html=True)
 
@@ -2489,17 +2822,18 @@ def main():
             st.toast(ui("已清空所有资料", "All data cleared"), icon="🗑️")
         st.markdown(
             f"<p style='color: #9b9ba3; margin-bottom: 1.2rem;'>"
-            f"{ui('备份、导入或清空你的全部本地数据（导师库 + 邮件记录）。', 'Back up, import, or clear all your local data (Professor DB + email records).')}</p>",
+            f"{ui('备份、导入或清空你的全部本地数据（导师库 + 邮件记录 + 口头 Offer）。', 'Back up, import, or clear all your local data (Professor DB + email records + verbal offers).')}</p>",
             unsafe_allow_html=True,
         )
 
         st.subheader(ui("备份资料", "Backup"))
-        st.caption(ui("一键导出全部资料为 JSON 文件（导师库 + 邮件记录）。", "Export everything as one JSON file (Professor DB + email records)."))
+        st.caption(ui("一键导出全部资料为 JSON 文件（包括口头 Offer）。", "Export everything as one JSON file, including verbal offers."))
         backup_payload = json.dumps({
-            "version": 1,
+            "version": 2,
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "professors": load_db(),
             "emails": load_lite_emails(),
+            "verbal_offers": load_verbal_offers(),
         }, ensure_ascii=False, indent=2)
         st.download_button(
             ui("备份资料（导出全部）", "Backup (export all)"),
@@ -2550,9 +2884,11 @@ def main():
                 payload = json.loads(up.getvalue().decode("utf-8"))
                 imp_profs = payload.get("professors", []) or []
                 imp_mails = payload.get("emails", []) or []
+                imp_offers = payload.get("verbal_offers", []) or []
                 if imp_mode == replace_label:
                     save_db(imp_profs)
                     save_lite_emails(imp_mails)
+                    save_verbal_offers(imp_offers)
                 else:
                     merged_db, _ = dedupe_db(load_db() + imp_profs)
                     save_db(merged_db)
@@ -2560,6 +2896,22 @@ def main():
                     seen_ids = {str(m.get("id")) for m in cur_mails}
                     cur_mails.extend(m for m in imp_mails if str(m.get("id")) not in seen_ids)
                     save_lite_emails(cur_mails)
+                    cur_offers = load_verbal_offers()
+                    offer_keys = {
+                        (
+                            str(item.get("导师/教授", "")),
+                            str(item.get("学校名称", "")),
+                        )
+                        for item in cur_offers
+                    }
+                    cur_offers.extend(
+                        item for item in imp_offers
+                        if (
+                            str(item.get("导师/教授", "")),
+                            str(item.get("学校名称", "")),
+                        ) not in offer_keys
+                    )
+                    save_verbal_offers(cur_offers)
                 st.session_state["data_import_toast"] = ui("导入成功！", "Imported successfully!")
                 st.rerun()
             except Exception as e:
@@ -2567,13 +2919,14 @@ def main():
 
         st.divider()
         st.subheader(ui("清空所有资料", "Clear all data"))
-        st.caption(ui("将永久删除所有导师库与邮件记录，不可恢复。建议先备份。",
-                      "Permanently deletes all professors and email records. Back up first."))
+        st.caption(ui("将永久删除所有导师库、邮件记录与口头 Offer，不可恢复。建议先备份。",
+                      "Permanently deletes all professors, email records, and verbal offers. Back up first."))
         clear_phrase = ui("确认清空", "CLEAR")
         typed = st.text_input(ui(f"输入「{clear_phrase}」以启用", f"Type '{clear_phrase}' to enable"), key="data_clear_confirm")
         if st.button(ui("清空所有资料", "Clear all data"), disabled=(typed.strip() != clear_phrase), key="data_clear_btn"):
             save_db([])
             save_lite_emails([])
+            save_verbal_offers([])
             st.session_state.pop("data_clear_confirm", None)
             st.session_state["data_cleared_flag"] = True
             st.rerun()

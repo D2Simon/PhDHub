@@ -20,6 +20,7 @@ EMAILS_CACHE_FILE = _data_path("phdhub_emails_cache.json")
 LITE_EMAILS_FILE = _data_path("phdhub_lite_emails.json")
 TEMPLATES_FILE = _data_path("phdhub_templates.json")
 INTERVIEW_REVIEWS_FILE = _data_path("phdhub_interview_reviews.json")
+VERBAL_OFFERS_FILE = _data_path("phdhub_verbal_offers.json")
 
 DEFAULT_CONFIG = {
     "email": "",
